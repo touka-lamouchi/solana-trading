@@ -1,0 +1,16 @@
+{
+  "dirty1_mint_authority": {
+    "mint": "EwSzy6UyLRe8D3eYNPFeMgubTL8ykXzq6CeVxrXNUKXm",
+    "issue": "Mint and freeze authority still active"
+  },
+  "dirty2_dev_heavy": {
+    "mint": "HYgcmsh7mzae3xFrJvhDhSiQwt6pFgxv4vVJeKFd9MaC",
+    "account": "3mLjVyST9HRM9kvRa7AGn3C2w8SLAypazhVdRWtNzC8L",
+    "issue": "90% supply in dev wallet"
+  },
+  "clean": {
+    "mint": "8UmL4RY3Y5Nnb47kbAVcsWs6dLyrcc42fEaLNMAAEyTU",
+    "account": "5t4bCT6v1q4cbbyCjKh7WFnKPLzHZaZwyHXH9pyFz5UP",
+    "note": "Normal token for comparison"
+  }
+}

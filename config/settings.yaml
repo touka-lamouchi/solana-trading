@@ -1,0 +1,72 @@
+# ── Network ──────────────────────────────────────────────
+network:
+  rpc_url: "https://api.devnet.solana.com"
+  ws_url: "wss://api.devnet.solana.com/"
+  cluster: "devnet"               # devnet | mainnet-beta
+  explorer_url: "https://explorer.solana.com"
+
+# ── Services ─────────────────────────────────────────────
+redis:
+  host: "localhost"
+  port: 6379
+
+ai_server:
+  host: "localhost"
+  port: 8000
+
+database:
+  name: "trading_bot"
+  host: "localhost"
+  port: 5432
+
+# ── Capital Limits ────────────────────────────────────────
+capital:
+  daily_limit_usd: 100            # max capital bot can deploy per day
+  max_per_trade_usd: 20           # hard cap per single transaction
+  flash_loan_max_usd: 500         # max flash loan size (no capital risk)
+
+# ── Trading Hours (UTC) ───────────────────────────────────
+trading_hours:
+  enabled: false                  # false = trade 24/7
+  start_utc: "08:00"
+  end_utc: "22:00"
+
+# ── Approval Mode ─────────────────────────────────────────
+approval:
+  fast_path: "auto"               # auto | manual
+  slow_path: "manual"             # auto | manual  (own capital — manual by default)
+
+# ── Protection Thresholds ─────────────────────────────────
+protection:
+  max_consecutive_failures: 5
+  drawdown_pause_pct: 90          # pause at 90% of daily limit
+  slippage_max_bps: 300           # 3% absolute max slippage (slow path)
+
+# ── Fee Settings ──────────────────────────────────────────
+fees:
+  base_priority_fee_microlamports: 5000
+  max_fee_pct_of_profit: 0.10     # cap priority fee at 10% of estimated profit
+  compute_units_per_hop: 300000   # compute budget units per pool hop
+  flash_loan_compute_units: 1000000
+
+# ── AMM Settings ─────────────────────────────────────────
+amm:
+  fee_numerator: 997              # 0.3% fee: amount_in * 997 / 1000
+  fee_denominator: 1000
+
+# ── MEV Protection (Jito) ────────────────────────────────
+jito:
+  block_engine_url: "https://mainnet.block-engine.jito.wtf"
+  tip_lamports: 1000
+  max_poll_attempts: 10
+  poll_interval_ms: 2000
+
+# ── Sandwich Detection ───────────────────────────────────
+sandwich_detection:
+  min_suspicious_lamports: 100000000   # 0.1 SOL — flag front-runs above this
+
+# ── Safety Filters ───────────────────────────────────────
+safety:
+  isolation_forest_threshold: 0.7      # anomaly score above this = suspicious
+  min_unique_holders: 1                # minimum token holders to pass s4 check
+  wash_trading_top2_threshold: 0.95    # top 2 wallets owning >95% = wash trading

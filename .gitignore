@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+programs-amm/target/
+programs-protection/target/
+dist/
+
+# Python virtualenvs
+.venv/
+ai/venv/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Wallet / secrets — NEVER commit these
+config/dev-wallet.json
+config/devnet_flash_vault.json
+ai/config/dev-wallet.json
+
+# Logs
+*.log
+
+# OS
+.DS_Store

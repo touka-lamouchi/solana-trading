@@ -1,0 +1,20 @@
+{
+  "tokenA": {
+    "name": "fUSDC",
+    "mint": "BzhYAzTEE929v5SYbCSFC6hF9oDUqPmM1sjHJ7a5tHMN",
+    "decimals": 6,
+    "account": "2SwdL43enBetG1Ytq4eUbi3GnciPdB64ZDCfkuvUDPDG"
+  },
+  "tokenB": {
+    "name": "fSOL",
+    "mint": "2BtDtoFDsLNxYs4auSYyBbDC7xbxUcoNdR8Qw1PVNzpC",
+    "decimals": 9,
+    "account": "8ynn9KefhJvt4Aeebft2NRSDxAnq4UxDPURaG3Hz6qmF"
+  },
+  "tokenC": {
+    "name": "fRAY",
+    "mint": "7CvVkbvjKu4Jj5tGpfKtL1EpRQdyXAJoGCCHU9drgMxh",
+    "decimals": 6,
+    "account": "HCvuE7WcqEHouPMaDfwGxToyJTjxguebtsgVEuTof4vT"
+  }
+}

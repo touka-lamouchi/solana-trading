@@ -1,0 +1,26 @@
+{
+  "pool1": {
+    "name": "fUSDC/fSOL",
+    "address": "4DmR9PqmKoxyj76iF1Mj49W4QqYqYZnWQKvTLrWYrwBu",
+    "tokenAVault": "61qwnqfk6gQnqbXLLjEw4qEXetRDRGj466dDqEn2MNb7",
+    "tokenBVault": "GSyrF6geCvWPPbVTmEFoUjoDZEx9Ayr32BGey4hneXXA",
+    "tokenA": "fUSDC",
+    "tokenB": "fSOL"
+  },
+  "pool2": {
+    "name": "fSOL/fRAY",
+    "address": "2FvWrVsUGaeM8mEkYHo9DXcWHuMndprAL4312hirzovP",
+    "tokenAVault": "Ef5cCoNKoGw8FcSnxZXszcYCTYy5Pq85VXhdvkzxeCgK",
+    "tokenBVault": "AKvwvhzs9jaXucLBQbn42Ks5XYLuTP98Z1A7oFewdKN",
+    "tokenA": "fSOL",
+    "tokenB": "fRAY"
+  },
+  "pool3": {
+    "name": "fUSDC/fRAY",
+    "address": "F4kzPVYjU2pvztLNGiuTwbvjxyVra5t3RpXXEQEPC7qk",
+    "tokenAVault": "8h1jSkdwAyv3Nx6rNGq6Z9xfdJ2f5T3khNyhBFvqweU6",
+    "tokenBVault": "AeYjzPDciPVK4y7dBXMavL6pavZZVyUTRM9s436oWhdQ",
+    "tokenA": "fUSDC",
+    "tokenB": "fRAY"
+  }
+}

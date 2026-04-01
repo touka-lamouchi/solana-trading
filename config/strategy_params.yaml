@@ -1,0 +1,47 @@
+# Per-strategy enable/disable + thresholds
+# These are read at startup and checked before routing each opportunity
+
+strategies:
+
+  # ── FAST PATH (flash loan, no capital risk) ────────────
+  crypto_arbitrage:
+    enabled: true
+    min_profit_usd: 0.50          # ignore arbs below this
+    min_profit_pct: 0.1           # ignore arbs below 0.1%
+
+  crypto_liquidation:
+    enabled: true
+    min_reward_usd: 1.00
+
+  rwa_price_deviation:
+    enabled: false                # Phase 10 — not built yet
+    min_deviation_pct: 0.5
+
+  rwa_cross_asset_arb:
+    enabled: false                # Phase 10 — not built yet
+    min_profit_usd: 1.00
+
+  # ── SLOW PATH (own capital, AI must confirm) ───────────
+  crypto_yield_farming:
+    enabled: true
+    min_apy_diff_pct: 2.0         # only act if yield diff > 2%
+    max_capital_usd: 10
+
+  momentum_trade:
+    enabled: false                # Phase 8 — needs AI models
+    min_lstm_confidence: 0.75
+    max_capital_usd: 10
+
+  sentiment_trade:
+    enabled: false                # Phase 8 — needs AI models
+    min_sentiment_score: 0.70
+    max_capital_usd: 5
+
+  rwa_yield_farming:
+    enabled: false                # Phase 10 — not built yet
+    min_apy_diff_pct: 1.5
+    max_capital_usd: 10
+
+  macro_momentum:
+    enabled: false                # Phase 10 — not built yet
+    max_capital_usd: 10

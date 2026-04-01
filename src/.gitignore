@@ -1,0 +1,6 @@
+node_modules/
+dist/
+config/dev-wallet.json
+ai/venv/
+.env
+*.log
