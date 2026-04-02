@@ -68,5 +68,8 @@ sandwich_detection:
 # ── Safety Filters ───────────────────────────────────────
 safety:
   isolation_forest_threshold: 0.7      # anomaly score above this = suspicious
+  max_dev_wallet_pct: 100              # devnet: we minted all tokens, wallet holds ~100%
+                                       # mainnet: set this to 20% or lower
   min_unique_holders: 1                # minimum token holders to pass s4 check
-  wash_trading_top2_threshold: 0.95    # top 2 wallets owning >95% = wash trading
+  wash_trading_top2_threshold: 1.0     # devnet: we own all tokens, top 2 will always be >95%
+                                       # mainnet: set this to 0.95

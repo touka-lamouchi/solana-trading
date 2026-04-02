@@ -7,7 +7,6 @@ export interface S4Result {
   token: string;
   checks: {
     washTradingDetected: boolean;
-    circularTransactions: boolean;
     suspiciousHolderCount: boolean;
   };
   failReason?: string;
@@ -45,7 +44,6 @@ export class AnomalyDetection {
       );
 
       let washTradingDetected = false;
-      let circularTransactions = false;
 
       if (totalSupply > 0 && largestAccounts.value.length >= 2) {
         const top2 = largestAccounts.value.slice(0, 2);
@@ -66,9 +64,6 @@ export class AnomalyDetection {
       if (washTradingDetected) {
         passed = false;
         failReason = "Wash trading pattern detected — top 2 wallets hold >95%";
-      } else if (circularTransactions) {
-        passed = false;
-        failReason = "Circular transaction pattern detected";
       } else if (suspiciousHolderCount) {
         passed = false;
         failReason = `Only ${holderCount} holders (minimum ${this.minUniqueHolders})`;
@@ -79,10 +74,9 @@ export class AnomalyDetection {
         token: mintAddress,
         checks: {
           washTradingDetected,
-          circularTransactions,
           suspiciousHolderCount,
         },
-        failReason,
+        ...(failReason !== undefined && { failReason }),
       };
 
       if (passed) {
@@ -99,7 +93,6 @@ export class AnomalyDetection {
         token: mintAddress,
         checks: {
           washTradingDetected: false,
-          circularTransactions: false,
           suspiciousHolderCount: true,
         },
         failReason: "Failed to analyze wallet graph",

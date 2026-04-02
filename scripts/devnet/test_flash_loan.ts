@@ -1,4 +1,4 @@
-import { Connection, PublicKey, SystemProgram, Keypair, Transaction } from "@solana/web3.js";
+import { Connection, PublicKey, SystemProgram, Keypair, Transaction, SYSVAR_INSTRUCTIONS_PUBKEY } from "@solana/web3.js";
 import { Program, AnchorProvider, Wallet, BN } from "@coral-xyz/anchor";
 import {
   TOKEN_PROGRAM_ID,
@@ -141,18 +141,19 @@ async function testFlashLoan() {
 
   // Build atomic transaction: borrow + repay in one tx
   const borrowIx = await program.methods
-    .executeFlashLoan(new BN(BORROW_AMOUNT))
+    .flashBorrow(new BN(BORROW_AMOUNT))
     .accounts({
       flashConfig: flashConfigPda,
       vault: vaultPubkey,
       borrowerToken: borrowerAta.address,
       borrower: wallet.publicKey,
       tokenProgram: TOKEN_PROGRAM_ID,
+      instructions: SYSVAR_INSTRUCTIONS_PUBKEY,
     })
     .instruction();
 
   const repayIx = await program.methods
-    .repayFlashLoan(new BN(BORROW_AMOUNT), new BN(BORROW_AMOUNT))
+    .flashRepay(new BN(BORROW_AMOUNT), new BN(BORROW_AMOUNT))
     .accounts({
       flashConfig: flashConfigPda,
       vault: vaultPubkey,
@@ -184,19 +185,20 @@ async function testFlashLoan() {
   logger.info("--- Test 2: Insufficient Repayment (should revert entire tx) ---");
 
   const borrowIx2 = await program.methods
-    .executeFlashLoan(new BN(BORROW_AMOUNT))
+    .flashBorrow(new BN(BORROW_AMOUNT))
     .accounts({
       flashConfig: flashConfigPda,
       vault: vaultPubkey,
       borrowerToken: borrowerAta.address,
       borrower: wallet.publicKey,
       tokenProgram: TOKEN_PROGRAM_ID,
+      instructions: SYSVAR_INSTRUCTIONS_PUBKEY,
     })
     .instruction();
 
   // Try to repay less than borrowed — should fail the require! check
   const repayIx2 = await program.methods
-    .repayFlashLoan(new BN(BORROW_AMOUNT - 1), new BN(BORROW_AMOUNT))
+    .flashRepay(new BN(BORROW_AMOUNT - 1), new BN(BORROW_AMOUNT))
     .accounts({
       flashConfig: flashConfigPda,
       vault: vaultPubkey,

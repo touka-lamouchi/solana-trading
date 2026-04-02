@@ -1,6 +1,7 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 import { getMint } from "@solana/spl-token";
 import { logger } from "../../utils/logger";
+import { getConfig } from "../../utils/config";
 
 export interface S1Result {
   passed: boolean;
@@ -18,9 +19,9 @@ export class OnChainHeuristics {
   private connection: Connection;
   private maxDevWalletPercent: number;
 
-  constructor(connection: Connection, maxDevWalletPercent: number = 100) {
+  constructor(connection: Connection, maxDevWalletPercent?: number) {
     this.connection = connection;
-    this.maxDevWalletPercent = maxDevWalletPercent;
+    this.maxDevWalletPercent = maxDevWalletPercent ?? getConfig().safety.max_dev_wallet_pct;
   }
 
   async check(mintAddress: string): Promise<S1Result> {
@@ -41,15 +42,18 @@ export class OnChainHeuristics {
 
       let devWalletPercent = 0;
       if (largestAccounts.value.length > 0 && totalSupply > 0) {
-        const largestBalance = Number(largestAccounts.value[0].amount);
-        devWalletPercent = (largestBalance / totalSupply) * 100;
+        const largest = largestAccounts.value[0];
+        if (largest) {
+          const largestBalance = Number(largest.amount);
+          devWalletPercent = (largestBalance / totalSupply) * 100;
+        }
       }
 
       const devWalletSafe = devWalletPercent <= this.maxDevWalletPercent;
 
       // Determine pass/fail
       let passed = true;
-      let failReason: string | undefined;
+      let failReason: string | undefined = undefined;
 
       if (!mintAuthorityRevoked) {
         passed = false;
@@ -71,7 +75,7 @@ export class OnChainHeuristics {
           devWalletPercent,
           devWalletSafe,
         },
-        failReason,
+        ...(failReason !== undefined && { failReason }),
       };
 
       if (passed) {

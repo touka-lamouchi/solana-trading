@@ -45,7 +45,7 @@ function makeProtection(overrides: {
       autoPausePercent: cfg.protection.drawdown_pause_pct,
     },
     slippage: { maxSlippageBps: overrides.slippageBps ?? cfg.protection.slippage_max_bps },
-    tradingHours: { enabled: false, startHour: 0, endHour: 23, timezone: "UTC" },
+    tradingHours: { enabled: false, startHour: 0, endHour: 23 },
   });
 }
 

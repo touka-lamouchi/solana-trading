@@ -1,7 +1,18 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::sysvar::instructions as ix_sysvar;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
+use sha2::{Sha256, Digest};
 
 declare_id!("57qgGcR2anVG58VLymRe1vyui2eUjtefFPmsYFUN3acH");
+
+/// Compute the 8-byte Anchor sighash for a given instruction name.
+fn anchor_sighash(name: &str) -> [u8; 8] {
+    let full = format!("global:{}", name);
+    let hash = Sha256::digest(full.as_bytes());
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&hash[..8]);
+    out
+}
 
 #[program]
 pub mod programs_protection {
@@ -19,10 +30,41 @@ pub mod programs_protection {
         Ok(())
     }
 
-    pub fn execute_flash_loan(
-        ctx: Context<FlashLoan>,
+    /// Borrow tokens from the flash vault.
+    ///
+    /// Atomicity is enforced via instruction introspection: this instruction
+    /// scans the remaining instructions in the current transaction and requires
+    /// that a matching `flash_repay` instruction exists later in the same tx.
+    /// If the borrower omits repayment, the borrow itself reverts.
+    pub fn flash_borrow(
+        ctx: Context<FlashBorrow>,
         borrow_amount: u64,
     ) -> Result<()> {
+        // ── Atomicity: verify a flash_repay instruction follows in this tx ──
+        let ixs = ctx.accounts.instructions.to_account_info();
+        let current_index = ix_sysvar::load_current_index_checked(&ixs)? as usize;
+        let repay_disc = anchor_sighash("flash_repay");
+
+        let mut found_repay = false;
+        let mut check_index = current_index + 1;
+        loop {
+            match ix_sysvar::load_instruction_at_checked(check_index, &ixs) {
+                Ok(ix) => {
+                    if ix.program_id == crate::ID
+                        && ix.data.len() >= 8
+                        && ix.data[..8] == repay_disc
+                    {
+                        found_repay = true;
+                        break;
+                    }
+                    check_index += 1;
+                }
+                Err(_) => break,
+            }
+        }
+        require!(found_repay, FlashError::MissingRepayInstruction);
+
+        // ── Transfer tokens from vault to borrower ──
         let authority_seeds = &[
             b"flash_vault".as_ref(),
             ctx.accounts.flash_config.authority.as_ref(),
@@ -47,16 +89,9 @@ pub mod programs_protection {
         Ok(())
     }
 
-    pub fn update_vault(
-        ctx: Context<UpdateVault>,
-    ) -> Result<()> {
-        ctx.accounts.flash_config.vault = ctx.accounts.new_vault.key();
-        msg!("Flash vault updated to {}", ctx.accounts.new_vault.key());
-        Ok(())
-    }
-
-    pub fn repay_flash_loan(
-        ctx: Context<RepayFlashLoan>,
+    /// Repay a flash loan. Must appear in the same transaction as `flash_borrow`.
+    pub fn flash_repay(
+        ctx: Context<FlashRepay>,
         repay_amount: u64,
         original_borrow: u64,
     ) -> Result<()> {
@@ -74,7 +109,18 @@ pub mod programs_protection {
             repay_amount,
         )?;
 
+        let config = &mut ctx.accounts.flash_config;
+        config.total_loans = config.total_loans.saturating_add(1);
+
         msg!("Flash loan repaid: {} tokens (borrowed: {})", repay_amount, original_borrow);
+        Ok(())
+    }
+
+    pub fn update_vault(
+        ctx: Context<UpdateVault>,
+    ) -> Result<()> {
+        ctx.accounts.flash_config.vault = ctx.accounts.new_vault.key();
+        msg!("Flash vault updated to {}", ctx.accounts.new_vault.key());
         Ok(())
     }
 }
@@ -91,6 +137,8 @@ pub struct FlashConfig {
 pub enum FlashError {
     #[msg("Flash loan repayment is less than borrowed amount")]
     InsufficientRepayment,
+    #[msg("Transaction must include a flash_repay instruction after flash_borrow")]
+    MissingRepayInstruction,
 }
 
 #[derive(Accounts)]
@@ -122,7 +170,7 @@ pub struct InitializeFlashVault<'info> {
 }
 
 #[derive(Accounts)]
-pub struct FlashLoan<'info> {
+pub struct FlashBorrow<'info> {
     #[account(
         seeds = [b"flash_vault", flash_config.authority.as_ref()],
         bump = flash_config.bump
@@ -137,6 +185,10 @@ pub struct FlashLoan<'info> {
 
     pub borrower: Signer<'info>,
     pub token_program: Program<'info, Token>,
+
+    /// CHECK: Instructions sysvar for atomicity enforcement
+    #[account(address = ix_sysvar::ID)]
+    pub instructions: AccountInfo<'info>,
 }
 
 #[derive(Accounts)]
@@ -155,8 +207,9 @@ pub struct UpdateVault<'info> {
 }
 
 #[derive(Accounts)]
-pub struct RepayFlashLoan<'info> {
+pub struct FlashRepay<'info> {
     #[account(
+        mut,
         seeds = [b"flash_vault", flash_config.authority.as_ref()],
         bump = flash_config.bump
     )]

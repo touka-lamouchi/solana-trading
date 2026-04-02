@@ -1,21 +1,27 @@
+import { Connection } from "@solana/web3.js";
+import { Program, AnchorProvider, Wallet } from "@coral-xyz/anchor";
+import { LAMPORTS_PER_SOL } from "@solana/web3.js";
+import fs from "fs";
+
 import { logger } from "./utils/logger";
-import { SolanaRPC } from "./infrastructure/solana_rpc";
 import { CacheManager } from "./cache/cache_manager";
 import { ModelServer } from "./models/model_server";
 import { loadWallet } from "./utils/wallet";
-import { loadConfig } from "./utils/config_loader";
-import { LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { getConfig, getStrategyConfig } from "./utils/config";
+import { ProtectionManager } from "./protection/protection_manager";
+import { TradingEngine } from "./engine/trading_engine";
 
 async function boot() {
   logger.info("=== Solana Trading Bot — Starting ===");
 
   // 0. Load config
-  const { bot, strategies } = loadConfig();
-  const enabledStrategies = Object.entries(strategies.strategies)
+  const config = getConfig();
+  const strategyConfig = getStrategyConfig();
+  const enabledStrategies = Object.entries(strategyConfig.strategies)
     .filter(([, v]) => v.enabled)
     .map(([k]) => k);
   logger.info(
-    { cluster: bot.network.cluster, strategies: enabledStrategies },
+    { cluster: config.network.cluster, strategies: enabledStrategies },
     "Config loaded"
   );
 
@@ -23,13 +29,16 @@ async function boot() {
   const wallet = loadWallet();
   logger.info({ pubkey: wallet.publicKey.toBase58() }, "Wallet loaded");
 
-  // 2. Connect to Solana DevNet
-  const solana = new SolanaRPC();
-  const blockhash = await solana.getLatestBlockhash();
-  logger.info({ blockhash }, "Solana DevNet connected");
+  // 2. Connect to Solana
+  const connection = new Connection(config.network.rpc_url, {
+    commitment: "confirmed",
+    confirmTransactionInitialTimeout: 60000,
+  });
+  const { blockhash } = await connection.getLatestBlockhash();
+  logger.info({ blockhash }, "Solana connected");
 
   // 3. Check wallet balance
-  const balance = await solana.getConnection().getBalance(wallet.publicKey);
+  const balance = await connection.getBalance(wallet.publicKey);
   logger.info({ balance: balance / LAMPORTS_PER_SOL }, "Wallet balance (SOL)");
 
   // 4. Connect to Redis
@@ -37,24 +46,66 @@ async function boot() {
   const redisPong = await cache.ping();
   logger.info({ connected: redisPong }, "Redis status");
 
-  // 5. Check AI server
-  const aiServer = new ModelServer();
-  const aiAlive = await aiServer.healthCheck();
-  logger.info({ alive: aiAlive }, "AI Server status");
-
   if (!redisPong) {
     logger.error("Redis is not running! Start it with: redis-server");
     process.exit(1);
   }
 
+  // 5. Check AI server
+  const aiServer = new ModelServer();
+  const aiAlive = await aiServer.healthCheck();
+  logger.info({ alive: aiAlive }, "AI Server status");
+
   if (!aiAlive) {
-    logger.warn("AI Server is not running — continuing without it for now");
+    logger.warn("AI Server is not running — slow path disabled");
   }
 
-  // 6. Subscribe to devnet slots
-  await solana.subscribeToSlots();
+  // 6. Load programs
+  const provider = new AnchorProvider(connection, new Wallet(wallet), { commitment: "confirmed" });
+  const ammIdl = JSON.parse(fs.readFileSync("programs-amm/target/idl/programs_amm.json", "utf-8"));
+  const flashIdl = JSON.parse(fs.readFileSync("programs-protection/target/idl/programs_protection.json", "utf-8"));
+  const ammProgram = new Program(ammIdl, provider) as any;
+  const flashProgram = new Program(flashIdl, provider) as any;
 
-  logger.info("=== Bot started successfully ===");
+  // 7. Load configs
+  const pools = JSON.parse(fs.readFileSync("config/devnet_pools.json", "utf-8"));
+  const tokens = JSON.parse(fs.readFileSync("config/devnet_tokens.json", "utf-8"));
+  const dirtyTokens = JSON.parse(fs.readFileSync("config/devnet_dirty_tokens.json", "utf-8"));
+
+  // 8. Protection manager
+  const protection = new ProtectionManager({
+    autoPause: { maxConsecutiveFailures: config.protection.max_consecutive_failures },
+    drawdown: {
+      dailyLimit: config.capital.daily_limit_usd,
+      autoPausePercent: config.protection.drawdown_pause_pct,
+    },
+    slippage: { maxSlippageBps: config.protection.slippage_max_bps },
+    tradingHours: {
+      enabled: config.trading_hours.enabled,
+      startHour: parseInt(config.trading_hours.start_utc?.split(":")[0] ?? "0"),
+      endHour: parseInt(config.trading_hours.end_utc?.split(":")[0] ?? "23"),
+    },
+  });
+
+  // 9. Create trading engine
+  const engine = new TradingEngine({
+    connection,
+    ammProgram,
+    flashProgram,
+    pools,
+    tokens,
+    dirtyTokens,
+    cache,
+    protection,
+  });
+
+  // 10. Graceful shutdown
+  process.on("SIGINT", () => { engine.stop(); process.exit(0); });
+  process.on("SIGTERM", () => { engine.stop(); process.exit(0); });
+
+  // 11. Start the engine loop (10s interval)
+  logger.info("=== Bot started — running tick loop ===");
+  await engine.startLoop(10_000);
 }
 
 boot().catch((err) => {

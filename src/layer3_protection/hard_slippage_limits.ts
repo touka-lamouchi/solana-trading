@@ -94,9 +94,13 @@ export class HardSlippageLimits {
     }
 
     if (simulatedOutputAmount === null) {
-      // Can't verify — let through with a warning
-      logger.warn("Hard slippage check: could not extract simulated output, allowing trade");
-      return { passed: true, simulatedOutputAmount: null, minRequiredAmount };
+      logger.warn("Hard slippage check: could not verify simulated output — rejecting trade");
+      return {
+        passed: false,
+        simulatedOutputAmount: null,
+        minRequiredAmount,
+        reason: "Could not verify simulated output — trade rejected",
+      };
     }
 
     if (simulatedOutputAmount < minRequiredAmount) {

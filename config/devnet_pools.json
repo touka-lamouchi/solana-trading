@@ -22,5 +22,16 @@
     "tokenBVault": "AeYjzPDciPVK4y7dBXMavL6pavZZVyUTRM9s436oWhdQ",
     "tokenA": "fUSDC",
     "tokenB": "fRAY"
+  },
+  "pool4_dirty": {
+    "name": "dirty1/fUSDC",
+    "address": "Ghp7U93nSGiiLEiDrFxccFd1LTNp9qdjEqdcxNPFtWsM",
+    "tokenAVault": "4gG8QwKKyTw1rAdiuD9Lqmq84usjFBSvPMrA15EMEPLY",
+    "tokenBVault": "8D8Uq2eQWyK24Gfz674oHqA6XxA4PKtUXNzvAcQDUUtm",
+    "tokenA": "dirty1",
+    "tokenB": "fUSDC",
+    "tokenAMint": "EwSzy6UyLRe8D3eYNPFeMgubTL8ykXzq6CeVxrXNUKXm",
+    "tokenBMint": "BzhYAzTEE929v5SYbCSFC6hF9oDUqPmM1sjHJ7a5tHMN",
+    "dirty": true
   }
 }

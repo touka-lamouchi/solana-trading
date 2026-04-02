@@ -2,9 +2,8 @@ import { logger } from "../utils/logger";
 
 export interface TradingHoursConfig {
   enabled: boolean;
-  startHour: number;  // 0-23
-  endHour: number;    // 0-23
-  timezone: string;
+  startHour: number;  // 0-23 UTC
+  endHour: number;    // 0-23 UTC
 }
 
 export class TradingHours {
@@ -26,7 +25,7 @@ export class TradingHours {
   canTrade(): boolean {
     if (!this.enabled) return true;
 
-    const hour = new Date().getHours();
+    const hour = new Date().getUTCHours();
 
     if (this.startHour < this.endHour) {
       // Normal range: e.g. 8-22

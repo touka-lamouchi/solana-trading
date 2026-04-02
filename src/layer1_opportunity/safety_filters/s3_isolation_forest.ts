@@ -60,7 +60,7 @@ export class IsolationForest {
         token: mintAddress,
         anomalyScore: cached.anomalyScore,
         threshold: this.threshold,
-        failReason: passed ? undefined : `Anomaly score ${cached.anomalyScore.toFixed(3)} exceeds threshold ${this.threshold}`,
+        ...(!passed && { failReason: `Anomaly score ${cached.anomalyScore.toFixed(3)} exceeds threshold ${this.threshold}` }),
       };
     } catch (error) {
       logger.error({ token: mintAddress, error }, "S3 ERROR — treating as failed");

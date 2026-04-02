@@ -1,5 +1,5 @@
 import {
-  Connection, PublicKey, Transaction, ComputeBudgetProgram,
+  Connection, PublicKey, Transaction, ComputeBudgetProgram, SYSVAR_INSTRUCTIONS_PUBKEY,
 } from "@solana/web3.js";
 import { Program, BN } from "@coral-xyz/anchor";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
@@ -128,13 +128,14 @@ export class TransactionBuilder {
     const borrowAmountRaw = new BN(Math.floor(borrowAmount * 10 ** borrowDecimals));
 
     const borrowIx = await flashProgram.methods
-      .executeFlashLoan(borrowAmountRaw)
+      .flashBorrow(borrowAmountRaw)
       .accounts({
         flashConfig: new PublicKey(flashConfig),
         vault: new PublicKey(flashVault),
         borrowerToken: new PublicKey(this.tokens.tokenA.account),
         borrower: this.wallet.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
+        instructions: SYSVAR_INSTRUCTIONS_PUBKEY,
       })
       .instruction();
 
@@ -170,7 +171,7 @@ export class TransactionBuilder {
     const repayAmountRaw = borrowAmountRaw; // repay at least what was borrowed
 
     const repayIx = await flashProgram.methods
-      .repayFlashLoan(repayAmountRaw, borrowAmountRaw)
+      .flashRepay(repayAmountRaw, borrowAmountRaw)
       .accounts({
         flashConfig: new PublicKey(flashConfig),
         vault: new PublicKey(flashVault),

@@ -1,7 +1,8 @@
 {
   "dirty1_mint_authority": {
     "mint": "EwSzy6UyLRe8D3eYNPFeMgubTL8ykXzq6CeVxrXNUKXm",
-    "issue": "Mint and freeze authority still active"
+    "issue": "Mint and freeze authority still active",
+    "account": "CHR73GjkDpTSyzpHqe2nvjEMXkCB8vSd9fKvdernjWbs"
   },
   "dirty2_dev_heavy": {
     "mint": "HYgcmsh7mzae3xFrJvhDhSiQwt6pFgxv4vVJeKFd9MaC",

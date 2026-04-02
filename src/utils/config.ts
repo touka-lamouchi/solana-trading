@@ -47,6 +47,7 @@ export interface AppConfig {
   };
   safety: {
     isolation_forest_threshold: number;
+    max_dev_wallet_pct: number;
     min_unique_holders: number;
     wash_trading_top2_threshold: number;
   };

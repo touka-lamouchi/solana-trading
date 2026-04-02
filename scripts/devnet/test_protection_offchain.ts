@@ -6,7 +6,7 @@ async function testProtection() {
     autoPause: { maxConsecutiveFailures: 3 },
     drawdown: { dailyLimit: 1000, autoPausePercent: 90 },
     slippage: { maxSlippageBps: 500 },
-    tradingHours: { enabled: false, startHour: 8, endHour: 22, timezone: "UTC" },
+    tradingHours: { enabled: false, startHour: 8, endHour: 22 },
   });
 
   // ============================================================

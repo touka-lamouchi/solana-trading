@@ -1,3 +1,19 @@
+/**
+ * src/protection/ — Core protection logic (pure business rules, no Solana deps)
+ *
+ *   AutoPause      — consecutive-failure counter + pause flag
+ *   Drawdown       — daily capital spending tracker
+ *   SlippageGuard  — minimum-output calculator
+ *   TradingHours   — time-window enforcer
+ *   ProtectionManager — orchestrates all four in canExecuteTrade()
+ *
+ * src/layer3_protection/ wraps these with Solana-specific behavior:
+ *   Layer3AutoPause    — cancels pending slow-path txs when pause fires
+ *   Layer3Drawdown     — emits EventEmitter events on daily-limit hit
+ *   HardSlippageLimits — simulates real txs on-chain before submission
+ *   JitoMevProtection  — bundles txs via Jito block engine
+ *   TxSubmitter        — runs canExecuteTrade() then signs & sends on-chain
+ */
 import { AutoPause, AutoPauseConfig } from "./auto_pause";
 import { Drawdown, DrawdownConfig } from "./drawdown";
 import { SlippageGuard, SlippageConfig } from "./slippage_guard";

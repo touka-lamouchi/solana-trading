@@ -118,6 +118,16 @@ async function populateCaches() {
     anomalyScore: 0.15,
     updatedAt: Date.now(),
   });
+  await tokenScore.set(tokens.tokenC.mint, {
+    token: tokens.tokenC.mint,
+    overallScore: 85,
+    liquidityLocked: true,
+    mintAuthorityRevoked: true,
+    devWalletPercent: 10,
+    isHoneypot: false,
+    anomalyScore: 0.2,
+    updatedAt: Date.now(),
+  });
 
   // Load dirty tokens and score them low
   const dirty = JSON.parse(fs.readFileSync("config/devnet_dirty_tokens.json", "utf-8"));
