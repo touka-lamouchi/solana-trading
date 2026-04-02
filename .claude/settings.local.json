@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm //wsl.localhost/Ubuntu/home/user/projects/solana-trading-bot/src/layer1_opportunity/rwa/rwa_price_deviation.ts //wsl.localhost/Ubuntu/home/user/projects/solana-trading-bot/src/layer1_opportunity/rwa/rwa_yield_monitor.ts //wsl.localhost/Ubuntu/home/user/projects/solana-trading-bot/src/layer1_opportunity/rwa/rwa_macro_momentum.ts //wsl.localhost/Ubuntu/home/user/projects/solana-trading-bot/src/layer1_opportunity/rwa/rwa_cross_asset_arb.ts)",
+      "Bash(rmdir //wsl.localhost/Ubuntu/home/user/projects/solana-trading-bot/src/layer1_opportunity/rwa)"
+    ]
+  }
+}

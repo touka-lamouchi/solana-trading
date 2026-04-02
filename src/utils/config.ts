@@ -51,6 +51,13 @@ export interface AppConfig {
     min_unique_holders: number;
     wash_trading_top2_threshold: number;
   };
+  whale_tracking?: {
+    enabled: boolean;
+    scan_interval_ms: number;
+    min_whale_balance_pct: number;
+    accumulation_threshold_pct: number;
+    distribution_threshold_pct: number;
+  };
 }
 
 export interface StrategyConfig {

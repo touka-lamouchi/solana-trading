@@ -10,6 +10,8 @@ import { loadWallet } from "./utils/wallet";
 import { getConfig, getStrategyConfig } from "./utils/config";
 import { ProtectionManager } from "./protection/protection_manager";
 import { TradingEngine } from "./engine/trading_engine";
+import { WhaleTracker } from "./layer1_opportunity/whale_tracker";
+import { WhaleCache } from "./cache/whale_cache";
 
 async function boot() {
   logger.info("=== Solana Trading Bot — Starting ===");
@@ -99,11 +101,25 @@ async function boot() {
     protection,
   });
 
-  // 10. Graceful shutdown
-  process.on("SIGINT", () => { engine.stop(); process.exit(0); });
-  process.on("SIGTERM", () => { engine.stop(); process.exit(0); });
+  // 10. Start whale tracker (separate 60s loop)
+  let whaleTracker: WhaleTracker | null = null;
+  if (config.whale_tracking?.enabled) {
+    const whaleCache = new WhaleCache(cache);
+    const trackedMints = [tokens.tokenA.mint, tokens.tokenB.mint, tokens.tokenC.mint];
+    whaleTracker = new WhaleTracker(connection, whaleCache, trackedMints, {
+      scanIntervalMs: config.whale_tracking.scan_interval_ms,
+      minWhaleBalancePct: config.whale_tracking.min_whale_balance_pct,
+      accumulationThresholdPct: config.whale_tracking.accumulation_threshold_pct,
+      distributionThresholdPct: config.whale_tracking.distribution_threshold_pct,
+    });
+    whaleTracker.startLoop();
+  }
 
-  // 11. Start the engine loop (10s interval)
+  // 11. Graceful shutdown
+  process.on("SIGINT", () => { whaleTracker?.stop(); engine.stop(); process.exit(0); });
+  process.on("SIGTERM", () => { whaleTracker?.stop(); engine.stop(); process.exit(0); });
+
+  // 12. Start the engine loop (10s interval)
   logger.info("=== Bot started — running tick loop ===");
   await engine.startLoop(10_000);
 }

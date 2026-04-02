@@ -19,6 +19,8 @@ import { TransactionBuilder } from "../layer2_execution/transaction_builder";
 import { TxSubmitter } from "../layer3_protection/tx_submitter";
 import { RoutePlanner } from "../layer2_execution/route_planner";
 import { CacheManager } from "../cache/cache_manager";
+import { WhaleCache } from "../cache/whale_cache";
+import { WhaleSignal } from "../layer1_opportunity/ai_signals/whale_signal";
 import { loadWallet } from "../utils/wallet";
 import { getConfig } from "../utils/config";
 import { logger } from "../utils/logger";
@@ -71,6 +73,7 @@ export class TradingEngine {
   private submitter: TxSubmitter;
   private routePlanner: RoutePlanner;
   private cache: CacheManager;
+  private whaleSignal: WhaleSignal;
 
   private baseMint: string; // fUSDC mint — we trust this, skip safety on it
   private running = false;
@@ -103,6 +106,9 @@ export class TradingEngine {
       opts.connection, opts.ammProgram, opts.protection.slippage, opts.tokens,
     );
     this.submitter = new TxSubmitter(this.txBuilder, opts.protection);
+
+    const whaleCache = new WhaleCache(opts.cache);
+    this.whaleSignal = new WhaleSignal(whaleCache);
 
     logger.info("Trading engine initialized");
   }
@@ -276,6 +282,24 @@ export class TradingEngine {
           reason: safetyFailReason,
         });
         continue;
+      }
+
+      // ── Whale signal (log-only, non-blocking) ──
+      for (const mint of opp.involvedMints) {
+        try {
+          const ws = await this.whaleSignal.getSignal(mint);
+          if (ws.netDirection !== "unknown") {
+            logger.info({
+              token: mint.slice(0, 8) + "...",
+              direction: ws.netDirection,
+              accumulating: ws.accumulatingCount,
+              distributing: ws.distributingCount,
+              confidence: ws.avgConfidence,
+            }, "  → Whale signal");
+          }
+        } catch (e: any) {
+          logger.debug({ mint: mint.slice(0, 8), error: e.message }, "Whale signal lookup failed");
+        }
       }
 
       // ── Step 2: Route ──

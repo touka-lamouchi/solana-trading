@@ -73,3 +73,11 @@ safety:
   min_unique_holders: 1                # minimum token holders to pass s4 check
   wash_trading_top2_threshold: 1.0     # devnet: we own all tokens, top 2 will always be >95%
                                        # mainnet: set this to 0.95
+
+# ── Whale Tracking ──────────────────────────────────────
+whale_tracking:
+  enabled: true
+  scan_interval_ms: 60000              # scan every 60s (separate from 10s tick)
+  min_whale_balance_pct: 5             # wallet must hold >= 5% of supply to be "whale"
+  accumulation_threshold_pct: 5        # balance delta > +5% = accumulating
+  distribution_threshold_pct: 5        # balance delta < -5% = distributing
