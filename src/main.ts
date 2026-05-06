@@ -12,6 +12,9 @@ import { ProtectionManager } from "./protection/protection_manager";
 import { TradingEngine } from "./engine/trading_engine";
 import { WhaleTracker } from "./layer1_opportunity/whale_tracker";
 import { WhaleCache } from "./cache/whale_cache";
+import { MainnetRPC } from "./infrastructure/mainnet_rpc";
+import { VaultReader } from "./vault/vault_reader";
+import { PoolMonitor } from "./infrastructure/pool_monitor";
 
 async function boot() {
   logger.info("=== Solana Trading Bot — Starting ===");
@@ -89,6 +92,37 @@ async function boot() {
     },
   });
 
+  // 8b. Attach per-user vault reader (single-user mode = dev wallet is both owner and bot)
+  if (config.vault?.program_id) {
+    try {
+      const baseTokenName = config.vault.base_mint ?? "fUSDC";
+      const baseTokenEntry = Object.values(tokens).find(
+        (t: any) => t.name === baseTokenName,
+      ) as any;
+      if (!baseTokenEntry) {
+        throw new Error(`Base token ${baseTokenName} not found in devnet_tokens.json`);
+      }
+      const { PublicKey } = await import("@solana/web3.js");
+      const vaultReader = new VaultReader({
+        connection,
+        signerForReads: wallet,
+        userPubkey: wallet.publicKey,
+        baseMint: new PublicKey(baseTokenEntry.mint),
+      });
+      protection.attachVaultReader(vaultReader);
+      const initial = await vaultReader.getState();
+      logger.info({
+        exists: initial.exists,
+        balance: initial.balance,
+        active: initial.isActive,
+      }, "Vault attached");
+    } catch (e: any) {
+      logger.warn({ error: e.message }, "VaultReader init failed — running without vault gating");
+    }
+  } else {
+    logger.info("No vault.program_id in settings.yaml — vault gating disabled");
+  }
+
   // 9. Create trading engine
   const engine = new TradingEngine({
     connection,
@@ -99,14 +133,28 @@ async function boot() {
     dirtyTokens,
     cache,
     protection,
+    userKeypair: wallet,
   });
 
-  // 10. Start whale tracker (separate 60s loop)
+  // 10. Init ingestion service (loads feature columns from AI server)
+  await engine.initIngestion();
+
+  // 10b. Attach event-driven pool monitor — subscribes to all vault accounts
+  // so arb and liquidation detection fires immediately on any price change.
+  const poolMonitor = new PoolMonitor({ connection, pools, tokens });
+  engine.attachPoolMonitor(poolMonitor);
+  logger.info("PoolMonitor attached — event-driven arb/liquidation active");
+
+  // 10b. Start whale tracker (separate 60s loop)
   let whaleTracker: WhaleTracker | null = null;
   if (config.whale_tracking?.enabled) {
     const whaleCache = new WhaleCache(cache);
-    const trackedMints = [tokens.tokenA.mint, tokens.tokenB.mint, tokens.tokenC.mint];
-    whaleTracker = new WhaleTracker(connection, whaleCache, trackedMints, {
+    const mainnetMode = config.ai?.data_source === "mainnet";
+    const whaleConnection = mainnetMode ? new MainnetRPC().getConnection() : connection;
+    const trackedMints = mainnetMode && config.ai?.target_mint_mainnet
+      ? [config.ai.target_mint_mainnet]
+      : [tokens.tokenA.mint, tokens.tokenB.mint, tokens.tokenC.mint];
+    whaleTracker = new WhaleTracker(whaleConnection, whaleCache, trackedMints, {
       scanIntervalMs: config.whale_tracking.scan_interval_ms,
       minWhaleBalancePct: config.whale_tracking.min_whale_balance_pct,
       accumulationThresholdPct: config.whale_tracking.accumulation_threshold_pct,
@@ -116,8 +164,8 @@ async function boot() {
   }
 
   // 11. Graceful shutdown
-  process.on("SIGINT", () => { whaleTracker?.stop(); engine.stop(); process.exit(0); });
-  process.on("SIGTERM", () => { whaleTracker?.stop(); engine.stop(); process.exit(0); });
+  process.on("SIGINT", () => { whaleTracker?.stop(); engine.stop(); poolMonitor.stop(); process.exit(0); });
+  process.on("SIGTERM", () => { whaleTracker?.stop(); engine.stop(); poolMonitor.stop(); process.exit(0); });
 
   // 12. Start the engine loop (10s interval)
   logger.info("=== Bot started — running tick loop ===");

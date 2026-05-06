@@ -36,6 +36,22 @@ export class YieldRateMonitor {
     logger.info({ count: yields.length }, "Loaded protocol yields");
   }
 
+  // Return the current snapshot (for debug / status endpoints)
+  getYields(): ProtocolYield[] {
+    return this.yields;
+  }
+
+  // Devnet helper: simulate APY fluctuation each tick so gaps vary dynamically.
+  // Each APY drifts by up to ±maxDriftPct absolute (e.g. 0.5 = ±0.5 pp swing),
+  // clamped to a reasonable range. Mainnet would replace this with a live API call.
+  refresh(maxDriftPct = 0.5): void {
+    for (const y of this.yields) {
+      const drift = (Math.random() * 2 - 1) * maxDriftPct;
+      y.apy = Math.max(0.1, Math.min(50, y.apy + drift));
+      y.lastUpdated = Date.now();
+    }
+  }
+
   // Find yield opportunities — where one protocol offers significantly more
   scan(): YieldOpportunity[] {
     const opportunities: YieldOpportunity[] = [];

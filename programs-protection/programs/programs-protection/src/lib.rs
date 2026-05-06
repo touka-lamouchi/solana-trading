@@ -1,9 +1,18 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::sysvar::instructions as ix_sysvar;
+use anchor_lang::solana_program::{
+    sysvar::instructions as ix_sysvar,
+    pubkey,
+};
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use sha2::{Sha256, Digest};
 
 declare_id!("57qgGcR2anVG58VLymRe1vyui2eUjtefFPmsYFUN3acH");
+
+// Trusted vault program — flash_borrow skips the top-level introspection
+// check when the borrower is a PDA owned by this program, because the vault
+// program's bot_arb_via_flash instruction guarantees nested-CPI atomicity
+// (borrow → swap × 3 → repay all in the same nested call sequence).
+const VAULT_PROGRAM_ID: Pubkey = pubkey!("Gw6USbf98yEjLLFa9aTeNpQjAvRjuZ2576AVvu3B1g6H");
 
 /// Compute the 8-byte Anchor sighash for a given instruction name.
 fn anchor_sighash(name: &str) -> [u8; 8] {
@@ -40,29 +49,42 @@ pub mod programs_protection {
         ctx: Context<FlashBorrow>,
         borrow_amount: u64,
     ) -> Result<()> {
-        // ── Atomicity: verify a flash_repay instruction follows in this tx ──
-        let ixs = ctx.accounts.instructions.to_account_info();
-        let current_index = ix_sysvar::load_current_index_checked(&ixs)? as usize;
-        let repay_disc = anchor_sighash("flash_repay");
+        // ── Atomicity check ──
+        // If the borrower account is a PDA owned by the trusted vault program,
+        // skip the top-level instruction-sysvar scan: the vault program is
+        // responsible for pairing borrow with repay as nested CPIs in the
+        // same parent call (Solana transaction atomicity guarantees rollback
+        // if any nested CPI fails).
+        //
+        // Otherwise (regular wallet borrower), require flash_repay later in
+        // the same transaction at the top level.
+        let borrower_owner = ctx.accounts.borrower.owner;
+        let trusted_caller = borrower_owner == &VAULT_PROGRAM_ID;
 
-        let mut found_repay = false;
-        let mut check_index = current_index + 1;
-        loop {
-            match ix_sysvar::load_instruction_at_checked(check_index, &ixs) {
-                Ok(ix) => {
-                    if ix.program_id == crate::ID
-                        && ix.data.len() >= 8
-                        && ix.data[..8] == repay_disc
-                    {
-                        found_repay = true;
-                        break;
+        if !trusted_caller {
+            let ixs = ctx.accounts.instructions.to_account_info();
+            let current_index = ix_sysvar::load_current_index_checked(&ixs)? as usize;
+            let repay_disc = anchor_sighash("flash_repay");
+
+            let mut found_repay = false;
+            let mut check_index = current_index + 1;
+            loop {
+                match ix_sysvar::load_instruction_at_checked(check_index, &ixs) {
+                    Ok(ix) => {
+                        if ix.program_id == crate::ID
+                            && ix.data.len() >= 8
+                            && ix.data[..8] == repay_disc
+                        {
+                            found_repay = true;
+                            break;
+                        }
+                        check_index += 1;
                     }
-                    check_index += 1;
+                    Err(_) => break,
                 }
-                Err(_) => break,
             }
+            require!(found_repay, FlashError::MissingRepayInstruction);
         }
-        require!(found_repay, FlashError::MissingRepayInstruction);
 
         // ── Transfer tokens from vault to borrower ──
         let authority_seeds = &[
@@ -183,7 +205,11 @@ pub struct FlashBorrow<'info> {
     #[account(mut)]
     pub borrower_token: Account<'info, TokenAccount>,
 
-    pub borrower: Signer<'info>,
+    /// CHECK: borrower can be a wallet (signer) or a PDA signed by a trusted
+    /// caller program (e.g., the vault program). The SPL token transfer in
+    /// flash_repay enforces that this account's signer flag is set.
+    #[account(mut, signer)]
+    pub borrower: AccountInfo<'info>,
     pub token_program: Program<'info, Token>,
 
     /// CHECK: Instructions sysvar for atomicity enforcement
@@ -221,6 +247,10 @@ pub struct FlashRepay<'info> {
     #[account(mut)]
     pub borrower_token: Account<'info, TokenAccount>,
 
-    pub borrower: Signer<'info>,
+    /// CHECK: borrower can be a wallet (signer) or a PDA signed by a trusted
+    /// caller program (e.g., the vault program). The SPL token transfer in
+    /// flash_repay enforces that this account's signer flag is set.
+    #[account(mut, signer)]
+    pub borrower: AccountInfo<'info>,
     pub token_program: Program<'info, Token>,
 }

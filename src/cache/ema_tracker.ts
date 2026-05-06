@@ -13,11 +13,12 @@ export interface EMARecord {
 
 export class EMATracker {
   private cache: CacheManager;
-  private prefix = "ema:";
+  private prefix: string;
   private alpha = 0.1;     // recent trades weighted 10x more
 
-  constructor(cache: CacheManager) {
+  constructor(cache: CacheManager, userId: string = "default") {
     this.cache = cache;
+    this.prefix = `ema:${userId}:`;
   }
 
   private getKey(strategy: string, token: string, dex: string): string {

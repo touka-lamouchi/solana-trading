@@ -1,0 +1,44 @@
+version: 2
+
+secret:
+  # Solana public keys (base58, 32-44 chars) are NOT secrets — they are public addresses.
+  # GitGuardian flags them as "Generic High Entropy Secret" because of high entropy.
+  ignored-paths:
+    - "config/devnet_tokens.json"
+    - "config/devnet_pools.json"
+    - "config/devnet_dirty_tokens.json"
+    - "scripts/devnet/**"
+    - "programs-amm/**"
+    - "programs-protection/**"
+    - "programs-vault/**"
+    - "package-lock.json"
+
+  ignored-matches:
+    # Solana well-known program IDs
+    - name: "Solana Token Program"
+      match: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    - name: "Solana Associated Token Program"
+      match: "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+    - name: "Solana Rent Sysvar"
+      match: "SysvarRent111111111111111111111111111111111"
+    - name: "AMM Program ID"
+      match: "CzpMFPxKuL2qSXiZUGmYEdY6LSbD1zdmK25ZNpjukR9K"
+    - name: "Flash Loan Program ID"
+      match: "57qgGcR2anVG58VLymRe1vyui2eUjtefFPmsYFUN3acH"
+    # Jito tip accounts (public, well-known)
+    - name: "Jito Tip Account 1"
+      match: "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5"
+    - name: "Jito Tip Account 2"
+      match: "HFqU5x63VTqvB8eLBRUMyMNiNEKVUSFkXnZZHuSqtLDQ"
+    - name: "Jito Tip Account 3"
+      match: "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY"
+    - name: "Jito Tip Account 4"
+      match: "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zcaozgtRBE"
+    - name: "Jito Tip Account 5"
+      match: "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh"
+    - name: "Jito Tip Account 6"
+      match: "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt"
+    - name: "Jito Tip Account 7"
+      match: "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL"
+    - name: "Jito Tip Account 8"
+      match: "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT"

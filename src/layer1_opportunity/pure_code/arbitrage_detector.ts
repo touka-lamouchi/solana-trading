@@ -3,7 +3,15 @@ import { logger } from "../../utils/logger";
 import { getConfig, getStrategyConfig } from "../../utils/config";
 
 export interface ArbOpportunity {
-  type: "arbitrage";
+  type:
+    | "arbitrage"
+    | "yield"
+    | "liquidation"
+    | "directional"
+    | "chart_pattern"
+    | "social_buzz"
+    | "copy_whale"
+    | "mempool_pressure";
   path: string;           // e.g. "pool1→pool3" or "pool1→pool2→pool3"
   tokenIn: string;
   tokenOut: string;
@@ -12,6 +20,7 @@ export interface ArbOpportunity {
   profitPercent: number;
   pools: PoolState[];
   timestamp: number;
+  signalSource?: string;  // which detector produced this opportunity
 }
 
 export interface PoolState {
@@ -166,6 +175,24 @@ export class ArbitrageDetector {
     }
 
     return null;
+  }
+
+  // Synchronous triangular arb check from pre-built in-memory states.
+  // Used by ArbReactor — no RPC call, just pure constant-product math.
+  // Returns the best opportunity found (highest profit) or null.
+  checkTriangularArbFromStates(
+    pool1: PoolState,
+    pool2: PoolState,
+    pool3: PoolState,
+    amountIn: number,
+  ): ArbOpportunity | null {
+    const forward = this.checkTriangularArb(pool1, pool2, pool3, amountIn);
+    const reverse = this.checkTriangularArb(pool3, pool2, pool1, amountIn);
+
+    if (!forward && !reverse) return null;
+    if (!forward) return reverse;
+    if (!reverse) return forward;
+    return forward.expectedProfit >= reverse.expectedProfit ? forward : reverse;
   }
 
   // Scan all pools for any arb opportunity

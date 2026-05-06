@@ -8,6 +8,24 @@ export interface AppConfig {
     ws_url: string;
     cluster: string;
     explorer_url: string;
+    mainnet_rpc_url?: string;
+  };
+  ai?: {
+    data_source?: "devnet" | "mainnet";
+    target_symbol?: string;
+    target_mint_mainnet?: string;
+    backfill_interval?: string;
+    backfill_candles?: number;
+  };
+  binance?: {
+    base_url?: string;
+    symbol?: string;
+    interval?: string;
+  };
+  pyth?: {
+    sol_usd_account?: string;
+    hermes_url?: string;
+    sol_usd_feed_id?: string;
   };
   redis: { host: string; port: number };
   ai_server: { host: string; port: number };
@@ -57,6 +75,10 @@ export interface AppConfig {
     min_whale_balance_pct: number;
     accumulation_threshold_pct: number;
     distribution_threshold_pct: number;
+  };
+  vault?: {
+    program_id: string;
+    base_mint?: string;
   };
 }
 

@@ -4,22 +4,45 @@ node_modules/
 # Build artifacts
 programs-amm/target/
 programs-protection/target/
+programs-vault/target/
+programs-lending/target/
 dist/
 
-# Python virtualenvs
+# Python
 .venv/
 ai/venv/
 **/__pycache__/
 *.pyc
 *.pyo
 
+# AI model binaries
+ai/*.pkl
+ai/*.keras
+ai/*.pt
+ai/*.h5
+ai/*.onnx
+ai/*.joblib
+
 # Wallet / secrets — NEVER commit these
 config/dev-wallet.json
 config/devnet_flash_vault.json
-ai/config/dev-wallet.json
+*.pem
+*.key
+.env
+.env.*
+
+# Redis dump
+dump.rdb
 
 # Logs
 *.log
 
 # OS
 .DS_Store
+Thumbs.db
+*:Zone.Identifier
+
+# IDE
+.idea/
+*.swp
+*.swo

@@ -1,236 +1,487 @@
 # Solana Trading Bot
 
-14-phase autonomous trading bot. DevNet-first, Mainnet-last.
-TypeScript + Python AI server + Anchor smart contracts.
+Multi-user autonomous trading platform on Solana. DevNet-first, with mainnet data sources wired for the AI signal layer.
+TypeScript engine + Python AI server + 3 deployed Anchor programs + React frontend.
 
-## How the Bot Works
+## Architecture Overview
 
-The bot brain is `src/engine/trading_engine.ts`. It has ONE method: `tick()`.
+Two repos:
+- **Backend:** `/home/user/projects/solana-trading-bot` — engine, API server, Anchor programs, scripts
+- **Frontend:** `/home/user/projects/PFE/trading-platform` — React + Vite + Solana wallet adapter
 
-`src/main.ts` boots infrastructure (Solana RPC, Redis, AI server, Anchor programs), creates a `TradingEngine`, then calls `engine.startLoop(10_000)` — which runs `tick()` every 10 seconds forever until Ctrl+C.
+## How the bot works
 
-### What happens each tick
+The bot is event-driven. There is no central polling tick. Each user gets a `UserLane` — a bounded FIFO queue + single-threaded consumer loop that invokes a LangGraph graph.
+
+### Single-user mode
+`src/main.ts` boots one `TradingEngine` and runs `engine.startLoop(10_000)` (legacy poll mode, no graph).
+
+### Multi-user mode (current — API server)
+`src/api/server.ts` runs Express + WebSocket on port 3001. `UserRegistry` creates one `TradingEngine` + one `UserLane` per connected user. Events flow from three sources into the lane queue:
+
+1. **ArbReactor** — fires on every pool reserve change; enqueues `arb_opportunity`
+2. **LiquidationReactor** — fires on every pool reserve change; enqueues `liq_opportunity`
+3. **CandleReactor** (shared, one Binance WS) — fires on each 1-min close; fans out `candle_closed` to all active lanes
+4. **SignalsTimer** — `setInterval(5000)` inside each lane; enqueues `signals_timer`
+
+### What the graph does per event
 
 ```
-Phase A: DISCOVER
-  Read ALL pool reserves from on-chain vaults
-  ArbitrageDetector.scan() → find triangular arb profit (constant-product formula)
-  Also check every non-triangular pool (dirty pools etc.) as synthetic opportunity
-  → Collect everything into ONE array
+signals_timer → full discovery subgraph:
+  scan_pools → [detect_arbs, detect_yields, detect_liquidations, ingest_candles]
+  ingest_candles → ai_decision → [detect_chart_pattern, detect_social_buzz,
+                                   detect_whale_copy, detect_mempool_pressure,
+                                   build_directional]
+  → filter_by_config → pick_next (loop) → route → fast or slow path → build_summary
 
-Phase B: EXECUTE (loop through each opportunity in FIFO order)
-  For each opportunity:
-    1. Extract token mints from pool config
-    2. SafetyPipeline.check(mint) — runs S1→S2→S3→S4 in sequence:
-       S1: on-chain heuristics (mint authority revoked? dev wallet < threshold?)
-       S2: honeypot detection (can we actually sell this token?)
-       S3: isolation forest (Redis cached anomaly score < 0.7?)
-       S4: anomaly detection (holder count, wash trading pattern)
-       → If ANY stage fails → log + SKIP → next opportunity
-    3. OpportunityRouter.route() → classify as "fast" or "slow"
-       fast = flash loan arb/liquidation (0 own capital)
-       slow = yield farming (own capital, needs AI — Phase 8 not done)
-    4. ProtectionManager.canExecuteTrade(0)
-       Checks: auto-pause (not paused?), trading hours (ok?), drawdown (within limit?)
-       → If blocked → log + SKIP → next opportunity
-    5. Build flash loan tx → TxSubmitter.submit() → record profit
-       flash_borrow → 3 AMM swaps → flash_repay (all atomic, one tx)
+arb_opportunity / liq_opportunity → fast execution tail only:
+  pre-populates filteredOpportunities → pick_next → route → fast path
+
+candle_closed → AI refresh + signal detectors:
+  same as signals_timer (short-circuits discovery if poolStates absent)
 ```
 
-Guards fire INSIDE the opportunity loop. A dirty token gets rejected at step 2, then the engine moves to the next opportunity naturally.
+### Fast path (arb / liquidation)
+```
+log_whale_signals → check_guard_fast → check_vault → execute_fast → pick_next
+```
 
-### Fast path vs slow path
+### Slow path (yield, directional, chart_pattern, social_buzz, copy_whale, mempool_pressure)
+```
+check_ai_threshold → check_safety → log_whale_signals → check_guard_slow → execute_slow → pick_next
+```
 
-| Opportunity Type | Path | Why |
+### Trade execution paths
+
+| Opportunity type | Default path | Custody | Notes |
+|---|---|---|---|
+| Triangular arb | flash-loan via bot wallet + sweep profit to vault | bot transit, profit lands in vault | Phase 3 sweep step (atomic) |
+| Triangular arb (`useVaultFlashArb=true`) | `vault.bot_arb_via_flash` (nested CPI: borrow→swap×3→repay) | vault PDA throughout | Phase 4 — no bot transit at all |
+| Triangular arb (`useVaultArb=true`) | `vault.bot_arb` using vault capital, no flash loan | vault PDA throughout | Limited to vault balance |
+| Slow path (yield, directional, chart_pattern, social_buzz, copy_whale, mempool_pressure) | `vault.bot_swap` CPI to AMM | vault PDA throughout | Bot only signs the outer tx |
+| Liquidation | not executable yet | — | Logged with reason; would need a real lending program |
+
+Fee guard: before submitting any flash arb, the engine estimates network fees (priority fee × CU + base fee × $SOL) and skips trades where `expectedProfit < networkFee × minProfitMultiplier` (default 1.5×). Prevents losses on tiny gaps.
+
+Per-trade cap precedence: `min(userConfig.maxTradeUsd, settings.capital.flash_loan_max_usd, opp.amountIn)` — the smallest wins. Depositing more + raising your per-user max actually scales borrow size.
+
+## Deployed Anchor programs (devnet)
+
+| Program | ID | Instructions |
 |---|---|---|
-| Arbitrage | fast | Flash loan — borrow→swap→repay atomically, 0 own capital |
-| Liquidation | fast | Same atomic flash loan pattern |
-| Yield farming | slow | Uses own capital, needs AI confirmation (Phase 8 not done) |
+| AMM | `CzpMFPxKuL2qSXiZUGmYEdY6LSbD1zdmK25ZNpjukR9K` | initialize_pool, add_liquidity, swap |
+| Flash loan | `57qgGcR2anVG58VLymRe1vyui2eUjtefFPmsYFUN3acH` | flash_borrow, flash_repay (skips top-level introspection when borrower is a PDA owned by the vault program) |
+| User vault | `Gw6USbf98yEjLLFa9aTeNpQjAvRjuZ2576AVvu3B1g6H` | create_vault, deposit, withdraw, set_active, authorize_bot, **bot_swap** (single-hop CPI to AMM with vault PDA as authority), **bot_arb** (3-hop with vault capital), **bot_arb_via_flash** (nested CPI: flash_borrow → swap×3 → flash_repay all under vault PDA) |
 
-Fast path: skip drawdown check (capitalRequired = 0), execute immediately.
-Slow path: blocked until Phase 8 AI models exist.
+Per-user vault PDA seeds: `["user_vault", phantom_pubkey]`. Each user has their own PDA, owns their fUSDC/fSOL/fRAY ATAs, and is the SPL transfer authority for everything inside.
 
-## Project Structure
+## AI brain
+
+5 sensors → 1 weighted aggregator → 1 decision.
+
+| Sensor | Where it runs | What it returns | Real data on devnet? |
+|---|---|---|---|
+| LSTM regime (XGBClassifier) | Python AI server `/predict/regime` | trending/ranging/crash | yes (mainnet candle data via IngestionService) |
+| GRU vol-expansion (Keras) | Python AI server `/predict/vol-expansion` | expansion probability | yes |
+| Sentiment | Python AI server `/predict/sentiment` (Reddit + Gemini 2.0 Flash if `GEMINI_API_KEY`, else VADER) | score [-1, +1], volume | yes (queried for wSOL on mainnet) |
+| Whale | TS WhaleTracker → Solana mainnet `getTokenLargestAccounts` | accumulating/distributing/holding + confidence | yes (wSOL whales tracked every 60s) |
+| Mempool | TS MempoolMonitor → Solana mainnet RPC `onLogs` for Raydium V4 + Orca Whirlpool | buy/sell pressure score [-1, +1] | yes |
+
+The aggregator (`DecisionModel.computeScore`) does Promise.all over the 5, normalizes each to [0,1], applies user-configurable weights, returns one `aiScore` + `direction` + signal breakdown. **One brain, five sense organs.**
+
+## Signal/trade bridge (devnet)
+
+When `ai.data_source: "mainnet"`, AI signals are populated under the **mainnet** mint key (e.g., wSOL `So11...112`). The 4 AI-driven detectors look up signals using the mainnet mint, but emit opportunities that **execute against your devnet pool1** (fUSDC/fSOL). Real signal → real on-chain devnet trade.
+
+## Project structure
 
 ```
 src/
   engine/
-    trading_engine.ts          # THE BOT BRAIN — tick() method
-  main.ts                      # Boot + engine.startLoop()
+    trading_engine.ts          # executeTriangularArbPublic + executeDirectionalTradePublic
+                               # startReactors() (API mode) + startLoop() (single-user)
+                               # exposeDetectors() for EngineDeps wiring
+                               # Fee guard + per-trade cap precedence + signal/trade bridge
+    arb_reactor.ts             # Subscribes to PoolMonitor; enqueues arb_opportunity events
+    liquidation_reactor.ts     # Subscribes to PoolMonitor; enqueues liq_opportunity events
+  main.ts                      # Single-user boot (legacy poll mode, no graph)
+  api/
+    server.ts                  # Express + WebSocket on :3001
+    user_registry.ts           # Per-user TradingEngine + UserLane + WhaleTracker
+                               # Wires reactors → lane; CandleReactor fans out to all lanes
+                               # Exposes queue backpressure metrics on /status
+    user_config.ts             # UserConfig + Redis storage
+  graph/                       # LangGraph orchestration layer (Phases 0–5, COMPLETE)
+    events.ts                  # Discriminated-union LaneEvent types + EventKind
+    queue.ts                   # EventQueue — bounded (256), FIFO, per-kind drop policy
+                               # drop_oldest: pool_changed, mempool_pressure, signals_timer
+                               # drop_newest: arb_opportunity, liq_opportunity
+                               # never_drop: candle_closed
+    deps.ts                    # EngineDeps — single object every graph node receives
+    state.ts                   # Annotation.Root graph state shape
+    build.ts                   # Wires all nodes + edges; returns CompiledGraph
+    entries.ts                 # signalsEntry / candleEntry / arbEntry / liqEntry
+    user_lane.ts               # UserLane — owns queue + consumer loop + signals timer
+                               # dispatch() routes each event kind to the right entry
+                               # stop() drains with 10s timeout then force-disposes
+    nodes/
+      discovery/
+        scan_pools.ts          # Reads pool reserves from PoolMonitor
+        detect_arbs.ts         # Triangular arb math
+        detect_yields.ts       # Empty (DefiLlama not wired)
+        detect_liquidations.ts # Reads loan registry from Redis + real prices
+        ingest_candles.ts      # Pulls latest candles from IngestionService
+        ai_decision.ts         # Runs DecisionModel.computeScore (5 signals)
+        detect_chart_pattern.ts
+        detect_social_buzz.ts
+        detect_whale_copy.ts
+        detect_mempool_pressure.ts
+        build_directional.ts   # Builds directional opp from AI decision
+        filter_by_config.ts    # Applies user config toggles
+      execution/
+        pick_next.ts           # Pops first from remainingOpportunities
+        route.ts               # fast vs slow via OpportunityRouter
+        log_whale_signals.ts   # Logs whale + mempool context before execution
+        check_guard_fast.ts    # ProtectionManager.canExecuteTrade (fast path)
+        check_vault.ts         # VaultReader balance gate
+        execute_fast.ts        # engine.executeTriangularArbPublic
+        check_ai_threshold.ts  # aiScore gate for slow path
+        check_safety.ts        # SafetyPipeline S1→S4
+        check_guard_slow.ts    # ProtectionManager.canExecuteTrade (slow path)
+        execute_slow.ts        # engine.executeDirectionalTradePublic
+        build_summary.ts       # Assembles TickResult from state.details
+        emit_status.ts         # wsEmit(scan_complete) to WebSocket listeners
+      utils.ts
   layer1_opportunity/
     pure_code/
-      arbitrage_detector.ts    # Reads pool reserves, calculates arb profit
-      liquidation_hunter.ts    # Watches undercollateralized positions
-      yield_rate_monitor.ts    # Monitors yield differentials
+      arbitrage_detector.ts    # Triangular arb math
+      liquidation_hunter.ts    # Reads loan registry from Redis,
+                               # applyPrices() updates from real pool reserves
+      yield_rate_monitor.ts    # Empty until DefiLlama is wired
     safety_filters/
-      safety_pipeline.ts       # Runs S1→S2→S3→S4, stops on first fail
-      s1_onchain_heuristics.ts # Mint authority, dev wallet %, token age
-      s2_honeypot_detector.ts  # Simulates sell via pool existence check
-      s3_isolation_forest.ts   # Redis-cached anomaly score
-      s4_anomaly_detection.ts  # Holder count, wash trading detection
-    opportunity_router.ts      # arb→fast, liquidation→fast, yield→slow
-    ai_signals/                # EMPTY STUBS — Phase 8 dependency
-      lstm_signal.ts
-      sentiment_signal.ts
-      whale_signal.ts
-    decision_model.ts          # EMPTY — Phase 8 dependency
+      safety_pipeline.ts       # S1→S4 chain (stops on first fail)
+      s1_onchain_heuristics.ts
+      s2_honeypot_detector.ts
+      s3_isolation_forest.ts
+      s4_anomaly_detection.ts
+    opportunity_router.ts
+    whale_tracker.ts           # Mainnet RPC scan when ai.data_source=mainnet
+    ai_signals/
+      lstm_signal.ts           # → /predict/regime + /predict/direction
+      sentiment_signal.ts      # → /predict/sentiment (Reddit + VADER/Gemini)
+      whale_signal.ts          # Reads WhaleCache
+      mempool_signal.ts        # Reads MempoolMonitor pressure
+      chart_pattern_detector.ts
+      social_buzz_detector.ts
+      whale_copy_detector.ts
+      mempool_pressure_detector.ts
+    decision_model.ts          # 5-signal Promise.all + weighted aggregation
   layer2_execution/
-    route_planner.ts           # Plans single-hop or triangular swap routes
-    transaction_builder.ts     # Builds AMM swap + flash loan txs, signs+sends
-    fee_calculator.ts          # Priority fees, % of profit cap
-    sandwich_detector.ts       # MEV pre-check
-    slippage_optimizer.ts      # STUB — needs Phase 8 AI
-    volatility_predictor.ts    # STUB — needs Phase 8 AI
+    route_planner.ts
+    transaction_builder.ts     # 5 builders:
+                               #   buildSwapTransaction (raw AMM)
+                               #   buildFlashLoanArbTransaction (+ optional sweep)
+                               #   buildVaultSwapTransaction (vault.bot_swap CPI)
+                               #   buildVaultArbTransaction (vault.bot_arb)
+                               #   buildVaultArbViaFlashTransaction (vault.bot_arb_via_flash)
+    fee_calculator.ts
+    sandwich_detector.ts
+    volatility_predictor.ts    # → /predict/vol-expansion
   layer3_protection/
-    tx_submitter.ts            # THE FINAL GATE — canExecuteTrade() then send
-    hard_slippage_limits.ts    # Simulates tx on-chain before submitting
-    jito_mev_protection.ts     # Jito bundle submission (dry-run on devnet)
-    auto_pause.ts              # Wraps core, cancels slow-path queue on pause
-    daily_drawdown.ts          # Wraps core, emits EventEmitter on limit hit
-  protection/                  # CORE LOGIC (pure TS, no Solana deps)
-    protection_manager.ts      # Orchestrates: auto-pause + drawdown + slippage + hours
-    auto_pause.ts              # Consecutive failure counter
-    drawdown.ts                # Daily capital tracker
-    slippage_guard.ts          # Min acceptable output calculator
-    trading_hours.ts           # Time window enforcer
+    tx_submitter.ts
+    hard_slippage_limits.ts
+    jito_mev_protection.ts
+    auto_pause.ts
+    daily_drawdown.ts
+  protection/                  # Pure TS, no Solana deps
+    protection_manager.ts      # auto-pause + drawdown + slippage + hours + vault
+    auto_pause.ts
+    drawdown.ts
+    slippage_guard.ts
+    trading_hours.ts
+  vault/
+    vault_reader.ts            # Per-user vault PDA reader + IDL Program
+                               # exposes balance, isActive, totalDeposits/Withdrawals
+                               # plus getVaultProgram() for the engine
   cache/
-    cache_manager.ts           # Redis connection (CacheManager)
+    cache_manager.ts
     sentiment_cache.ts
     whale_cache.ts
     lstm_cache.ts
-    token_score_cache.ts       # S3 reads anomaly scores from here
+    token_score_cache.ts
     ema_tracker.ts
   infrastructure/
-    solana_rpc.ts              # Connection + slot subscription
-    dex_listener.ts            # EMPTY STUB
-    mempool_monitor.ts         # EMPTY STUB
+    solana_rpc.ts
+    mainnet_rpc.ts             # Mainnet read-only RPC for AI sensors
+    mempool_monitor.ts         # onLogs(Raydium V4, Orca Whirlpool) on mainnet
+                               # writes pressure to Redis (no synthetic injection)
+    pool_monitor.ts            # accountSubscribe on all pool vault accounts
+                               # notifies ArbReactor + LiquidationReactor on reserve changes
+    candle_reactor.ts          # Binance WebSocket 1-min candles; emits candle_closed
+    dex_listener.ts
+  ingestion/
+    ingestion_service.ts       # Fetches mainnet candles (Binance) + Pyth ticks
+                               # for the AI server's feature window
+    candle_fetcher.ts
+    price_feeds/pyth_feed.ts
   models/
-    model_server.ts            # AI server health check client
+    model_server.ts            # AI server HTTP client
   utils/
-    config.ts                  # getConfig() / getStrategyConfig() — singleton YAML loaders
-    wallet.ts                  # loadWallet() from JSON keypair
-    logger.ts                  # Pino structured logger
-    metrics.ts                 # Prometheus metrics
+    config.ts                  # getConfig() / getStrategyConfig() — singleton YAML
+    wallet.ts
+    logger.ts
+    metrics.ts
 
 config/
-  settings.yaml               # ALL bot settings (no hardcodes in source)
-  strategy_params.yaml         # Strategy-specific params
-  devnet_tokens.json           # Token mints: tokenA=fUSDC, tokenB=fSOL, tokenC=fRAY
-  devnet_pools.json            # Pool addresses: pool1-3 clean, pool4_dirty
-  devnet_dirty_tokens.json     # Dirty token mints for e2e testing
-  devnet_flash_vault.json      # Flash loan vault PDA addresses
-  dev-wallet.json              # DevNet wallet keypair (gitignored)
+  settings.yaml               # All bot settings + ai.data_source + helius/mempool sections
+  strategy_params.yaml
+  devnet_tokens.json
+  devnet_pools.json
+  devnet_dirty_tokens.json
+  devnet_flash_vault.json
+  devnet_vault.json           # Reference vault PDA from deploy_vault.ts (dev wallet)
+  dev-wallet.json             # gitignored
 
-programs-amm/                  # Anchor program — deployed on devnet
-  programs/programs-amm/src/lib.rs   # swap, add_liquidity, remove_liquidity
-
-programs-protection/           # Anchor program — deployed on devnet
-  programs/programs-protection/src/lib.rs  # flash_borrow, flash_repay, update_vault
-  # flash_borrow enforces flash_repay in same tx via instruction introspection
+programs-amm/                 # AMM Anchor program
+programs-protection/          # Flash loan Anchor program (vault PDA borrowers supported)
+programs-vault/               # Per-user vault Anchor program (deployed)
 
 scripts/devnet/
-  test_e2e_pipeline.ts         # E2E test: boots engine, tick() once, asserts 7 checks
-  test_full_trade.ts           # Swap + arb + flash loan test
-  test_protection_integration.ts  # Real devnet protection tests
-  create_dirty_pool.ts         # Creates dirty1/fUSDC pool for e2e
-  populate_caches.ts           # Seeds Redis with synthetic anomaly scores
-  revoke_mint.ts               # Revokes mint+freeze authority on clean tokens
-  create_tokens.ts / create_pools.ts  # Initial devnet setup
+  README.md                   # "I want to test X → run Y" map
+  setup/                      # One-time devnet bring-up, run in numeric order
+    01_create_tokens.ts
+    02_revoke_mint.ts
+    03_create_pools.ts
+    04_create_dirty_tokens.ts
+    05_create_dirty_pool.ts
+    06_setup_flash_vault.ts
+    07_deploy_vault.ts        # Bot wallet's reference vault
+    populate_caches.ts        # Re-run after every Redis restart
+  trigger/                    # Create real activity for the live bot
+    create_arb.ts             # Push a pool out of equilibrium → real arb
+    create_loan.ts            # Register a loan position in Redis
+                              # --list / --clear / --delete=<id> for management
+    send_token_to.ts          # Generalized fUSDC/fSOL/fRAY/ALL sender
+  archive/                    # Stale or superseded — kept for reference
+    simulate_arb.ts, simulator.ts, test_transaction.ts, check_mints.ts
+
+tests/
+  unit/
+    test_detectors.ts, test_safety.ts, test_swap.ts, test_flash_loan.ts,
+    test_vault.ts, test_protection.ts, test_protection_offchain.ts,
+    test_cache_latency.ts
+    test_graph_topology.ts    # Graph compiles + all nodes reachable (no Solana deps)
+    test_lane_inert.ts        # Lane starts/stops cleanly with no events
+  integration/
+    test_e2e_pipeline.ts      # Full tick test
+    test_full_trade.ts
+    test_flash_vault_atomicity.ts
+    test_protection_integration.ts
+    test_phase9.ts
+    test_graph_arb.ts         # fixture pool change → arb event → trade executed
+    test_graph_liquidation.ts # fixture loan + price drop → liq detected
+    test_lane_backpressure.ts # flood queue → drop policy + user isolation
+  backtests/                  # (empty — future)
 
 ai/
-  server.py                    # FastAPI skeleton — /health only, no AI yet
+  server.py                   # FastAPI: /predict/regime, /predict/direction,
+                              # /predict/sentiment, /predict/vol-expansion
+  sentiment.py                # Reddit fetcher + VADER scorer
+  models/                     # Pickled XGBClassifier + Keras GRU
 ```
 
-## Phase Completion Status
+## Frontend
 
-| Phase | Status | Description |
-|-------|--------|-------------|
-| 1 | DONE | Infrastructure (RPC, wallet, logger, Redis, config) |
-| 2 | DONE | DevNet simulation (tokens, pools, dirty tokens) |
-| 3 | DONE | Redis cache layer (sentiment, whale, lstm, token_score, ema) |
-| 4 | DONE | Opportunity detectors (arb, liquidation, yield, router) |
-| 5 | DONE | Safety filters (S1-S4 pipeline) |
-| 6 | DONE | Anchor programs on devnet (AMM + flash loan) |
-| 7 | DONE | Execution layer (route planner, tx builder, fee calc, sandwich) |
-| 8 | PARTIAL | AI server skeleton only — no models, no endpoints |
-| 9 | DONE | Protection layer (auto-pause, drawdown, slippage, trading hours) |
-| 10 | CANCELLED | RWA — user decided not to do this |
-| 11 | DONE | Trading engine + main.ts loop (fast path working) |
-| 12 | NOT STARTED | Mainnet preparation |
-| 13 | NOT STARTED | Frontend dashboard |
-| 14 | NOT STARTED | Production deployment |
+Location: `/home/user/projects/PFE/trading-platform`
 
-## What's Blocked
-
-Phase 8 (AI models) blocks everything else:
-- `decision_model.ts` needs LSTM + sentiment + whale signals → blocks slow path
-- `slippage_optimizer.ts` needs `/predict/slippage` endpoint
-- `volatility_predictor.ts` needs `/predict/volatility` endpoint
-- Slow path trades skip execution until Phase 8 is done
-
-Fast path works end-to-end right now without AI.
-
-## DevNet Setup & Testing
-
-Prerequisites before running the bot or e2e test:
-```bash
-# 1. Start Redis
-redis-server
-
-# 2. Revoke mint authorities on clean tokens (run once, permanent)
-npx ts-node scripts/devnet/revoke_mint.ts
-
-# 3. Create dirty pool for e2e testing (run once)
-npx ts-node scripts/devnet/create_dirty_pool.ts
-
-# 4. Populate Redis with anomaly scores (run after each Redis restart)
-npx ts-node scripts/devnet/populate_caches.ts
+```
+src/
+  main.jsx                    # Entry — Buffer polyfill + React root
+  App.jsx                     # Shell — auth, nav, bot start/stop, polled SOL balance
+  pages/
+    AuthPage.jsx              # Phantom connect / browse mode
+    LiveCockpit.jsx           # KPIs + PnL chart + scrollable activity log + signals
+    BotBuilder.jsx            # My Setup — WalletPanel + VaultPanel + detector toggles
+    AnalyticsHub.jsx          # Results — real KPIs from useEngineData,
+                              # cumulative PnL chart, daily activity bars,
+                              # by-strategy breakdown, trade history table with
+                              # Solana Explorer links and "Vault PDA / Flash + sweep"
+                              # route badges. ZERO static data.
+    LLMAdvisor.jsx            # Stub
+    AITuning.jsx              # Stub
+  components/
+    WalletPanel.jsx           # Phantom address + tracked SPL token balances
+                              # + Vault holdings sub-section (vault PDA's ATAs —
+                              # this is where bot profits visibly land)
+                              # + recent activity (last 10 sigs → Explorer)
+    VaultPanel.jsx            # Real Anchor calls: createVault, deposit, withdraw
+                              # using IDL discriminators (no Anchor frontend dep)
+                              # Profit tile = balance - (deposits - withdrawals)
+  context/
+    ThemeContext.jsx
+    WalletContext.jsx         # Phantom + Solflare adapter, devnet RPC
+  hooks/
+    useEngineData.js          # Polls /status (5s), /trades (30s), WS subscription
+                              # Module-level cache survives tab unmount/remount
+                              # Trade dedup by signature (prevents drift)
+  lib/
+    api.js                    # REST + WebSocket client
+    vault_client.js           # Manual Anchor instruction builders for createVault,
+                              # deposit, withdraw + getVaultBalance, getVaultStats,
+                              # vaultExists, formatVaultError
+    cluster.js                # Single source of truth for CLUSTER, EXPLORER URLs,
+                              # TRACKED_TOKENS (fUSDC/fSOL/fRAY on devnet,
+                              # USDC/wSOL on mainnet — flip one constant to switch)
+  styles.css
+  vite.config.js              # vite-plugin-node-polyfills for Buffer/process
 ```
 
-Run the bot (24/7 loop):
+### Frontend ↔ Backend API
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/health` | GET | Server health |
+| `/users` | GET | List active users |
+| `/users/:userId/start` | POST | Start engine |
+| `/users/:userId/stop` | POST | Stop engine |
+| `/users/:userId/status` | GET | KPIs, protection, vault (balance, profit, deposits, withdrawals), AI |
+| `/users/:userId/config` | GET/POST | Read/write user config |
+| `/users/:userId/trades` | GET | Today's executed trades from Redis |
+| `/market` | GET | Viewer-mode market snapshot |
+| `ws://localhost:3001/ws` | WS | Per-user tick events (trade_executed, scan_complete, …) |
+
+WebSocket trade events include `oppType` so the frontend can render the right type badge + route badge.
+
+### UserConfig fields
+
+`dailyLimitUsd`, `maxTradeUsd`, `tradingHoursStart/End`, `flashLoans`, `yieldGaps`, `liquidations`, `chartPatterns`, `socialBuzz`, `copyWhales`, `useVaultArb`, `useVaultFlashArb`, `minProfitMultiplier`, `mode`.
+
+## Phase status (current snapshot)
+
+| Phase | Status |
+|---|---|
+| 1 Infrastructure | DONE |
+| 2 DevNet simulation | DONE |
+| 3 Redis cache layer | DONE |
+| 4 Opportunity detectors (7) | DONE — all real data, no synthetic seeds |
+| 5 Safety filters | DONE |
+| 6 Anchor programs (3) | DONE + per-user vault deployed |
+| 7 Execution layer | DONE — 5 transaction builders incl. vault-routed |
+| 8 AI server | DONE — 4 endpoints live (regime, direction, sentiment, vol-expansion) |
+| 9 Protection | DONE + vault wiring + fee guard |
+| 10 RWA | CANCELLED |
+| 11 Trading engine loop | DONE |
+| 12 Mainnet preparation | PARTIAL — AI signals already on mainnet data, trading still on devnet |
+| 13 Frontend dashboard | DONE — all panels real-data wired, vault custody visible |
+| Graph Phase 0 — Event types + queue contract | DONE |
+| Graph Phase 1 — Graph definition (all nodes + edges) | DONE |
+| Graph Phase 2 — Per-user UserLane + consumer loop | DONE |
+| Graph Phase 3 — Signal detectors through graph | DONE — signals_timer → full discovery |
+| Graph Phase 4 — Reactors as pure event sources | DONE — ArbReactor + LiquidationReactor enqueue; CandleReactor fans out |
+| Graph Phase 5 — Concurrency hardening | DONE — bounded queue, drop policy, metrics on /status, drain/stop, integration tests |
+| Graph Phase 6 — Honest liquidation | DONE — programs-lending Anchor program, LendingClient, execute_liq node, accountSubscribe reactor |
+| 14 Production deployment | NOT STARTED |
+
+## Removed (no fake data anywhere)
+
+- Hardcoded seeded yields (9 fake APYs) — gone
+- Hardcoded loan positions (5 Whale01..05) — gone
+- Synthetic dirty-pool arb opportunity (`expectedProfit: 0` filler) — gone
+- Synthetic-liquidation execution branch that fabricated profit without sending a tx — gone
+- Random direction/volume injection in MempoolMonitor — gone (only counts swaps with explicit direction + numeric volume)
+
+The bot reports `0 opportunities` when nothing real is happening. Every "Trade executed" line corresponds to a real on-chain signature.
+
+## DevNet setup & testing
+
 ```bash
+# One-time per Redis restart
+redis-server --daemonize yes
+npx ts-node scripts/devnet/setup/populate_caches.ts
+
+# Optional one-time (already done if config files exist)
+npx ts-node scripts/devnet/setup/02_revoke_mint.ts
+npx ts-node scripts/devnet/setup/05_create_dirty_pool.ts
+
+# AI server
+cd ai && source .venv/bin/activate && python server.py        # :8000
+
+# API server
+cd /home/user/projects/solana-trading-bot
+npx ts-node src/api/server.ts                                  # :3001
+
+# Frontend
+cd ~/projects/PFE/trading-platform
+npm run dev                                                    # :5173
+
+# Single-user mode
 npx ts-node src/main.ts
+
+# E2E test
+npx ts-node tests/integration/test_e2e_pipeline.ts
 ```
 
-Run e2e test (single tick):
+## Manually creating real opportunities
+
 ```bash
-npx ts-node scripts/devnet/test_e2e_pipeline.ts
+# Push a pool out of equilibrium → triangular arb fires next tick
+npx ts-node scripts/devnet/trigger/create_arb.ts                      # 5000 fUSDC into pool1
+npx ts-node scripts/devnet/trigger/create_arb.ts pool1 8000           # custom amount/pool
+
+# Register a loan position in the Redis registry
+npx ts-node scripts/devnet/trigger/create_loan.ts \
+  --collateralToken=fSOL --collateralAmount=10 \
+  --debtToken=fUSDC --debtAmount=1700 --threshold=1.20
+
+# Bot reads from Redis, computes health from REAL pool reserves on the next tick
+# Health < threshold → LIQUIDATION FOUND → real swap execution
+
+# Manage the registry
+npx ts-node scripts/devnet/trigger/create_loan.ts --list
+npx ts-node scripts/devnet/trigger/create_loan.ts --clear
+npx ts-node scripts/devnet/trigger/create_loan.ts --delete=<id>
+
+# Seed any wallet with test tokens (multi-token)
+npx ts-node scripts/devnet/trigger/send_token_to.ts ALL <pubkey>      # 1000 fUSDC + 5 fSOL + 200 fRAY
+npx ts-node scripts/devnet/trigger/send_token_to.ts fSOL <pubkey> 5
 ```
 
-The e2e test creates a price gap → calls `engine.tick()` once → asserts:
-- 4 pools scanned (3 clean + 1 dirty)
-- 2 opportunities found (triangular arb + dirty pool)
-- Dirty pool rejected by safety (S1: mint authority active)
-- Clean arb executed with profit via flash loan
-- Protection state healthy after
+## DevNet config gotchas
 
-## DevNet Config Gotchas
+`settings.yaml` thresholds that change for mainnet:
 
-`settings.yaml` has devnet-specific thresholds that MUST change for mainnet:
+| Setting | DevNet | Mainnet | Why |
+|---|---|---|---|
+| `max_dev_wallet_pct` | 100 | 20 | We minted all tokens |
+| `wash_trading_top2_threshold` | 1.0 | 0.95 | Top 2 holders = us + pool on devnet |
+| `min_unique_holders` | 1 | 10+ | Few holders on devnet |
+| `ai.data_source` | `mainnet` | `mainnet` | Already on mainnet for signals |
+| `ai.target_mint_mainnet` | `wSOL` | `wSOL` (or whatever target) | Drives WhaleTracker + MempoolMonitor + sentiment |
 
-| Setting | DevNet Value | Mainnet Value | Why |
-|---------|-------------|---------------|-----|
-| `max_dev_wallet_pct` | 100 | 20 | We minted all tokens, wallet holds ~100% |
-| `wash_trading_top2_threshold` | 1.0 | 0.95 | We own everything, top 2 holders = us + pool |
-| `min_unique_holders` | 1 | 10+ | Only a few holders on devnet |
+Frontend cluster flip: change one line in `src/lib/cluster.js` (`CLUSTER = "mainnet-beta"`) and every panel/explorer link follows.
 
-## Key Patterns
+## Key patterns
 
-- `getConfig()` / `getStrategyConfig()` — singleton YAML loaders, never import yaml files directly
+- `getConfig()` / `getStrategyConfig()` — singleton YAML loaders, never import yaml directly
 - `loadWallet()` — loads from `config/dev-wallet.json`
 - fUSDC (tokenA) is the base token — always trusted, never safety-checked
-- Token mints are resolved from pool config: `pool.tokenAMint`/`pool.tokenBMint` or looked up by name in devnet_tokens.json
-- Flash loan atomicity: `flash_borrow` uses instruction introspection to verify `flash_repay` exists in the same transaction
-- AMM formula: `output = (amountIn * 997 * reserveOut) / (reserveIn * 1000 + amountIn * 997)`
+- Token mints resolved from pool config or by name in `devnet_tokens.json`
+- AMM formula: `output = (in × 997 × reserveOut) / (reserveIn × 1000 + in × 997)`
+- Vault PDA seeds: `["user_vault", phantom_pubkey]`
+- Profit math (frontend): `vault_balance - (totalDeposits - totalWithdrawals)`
+- Frontend needs `vite-plugin-node-polyfills` for Buffer/process
+- Frontend `dailyLossLimit` (UI) = backend `dailyLimitUsd`
 
-## Two Protection Folders (intentional)
+## Two protection folders (intentional)
 
-- `src/protection/` — Pure business logic (no Solana imports): auto-pause counter, drawdown tracker, slippage calculator, trading hours
-- `src/layer3_protection/` — Solana wrappers that import `src/protection/`: tx submission, on-chain simulation, Jito bundles, EventEmitter events
+- `src/protection/` — Pure logic, no Solana deps
+- `src/layer3_protection/` — Solana wrappers around `src/protection/`
+- `ProtectionManager` supports runtime updates: `updateDrawdownLimit()`, `updateTradingHours()`, holds optional `vaultReader` for `getEffectiveCapital()`
 
 ## Environment
 
-- Project lives in WSL Ubuntu at `/home/user/projects/solana-trading-bot`
-- Windows accesses via `\\wsl.localhost\Ubuntu\...`
-- `npx tsc --noEmit` must run from inside WSL shell (not Windows)
-- Git push needs PAT authentication
+- WSL Ubuntu paths: `/home/user/projects/...`
+- Windows access: `\\wsl.localhost\Ubuntu\...`
+- `npx tsc --noEmit` from inside WSL only
+- Anchor builds: `cd programs-X && anchor build && anchor deploy --provider.cluster devnet`
+- Anchor preserves program IDs across upgrades when the upgrade authority signs

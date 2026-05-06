@@ -1,8 +1,13 @@
 fastapi
 uvicorn
-torch
-transformers
-xgboost
+tensorflow-cpu
 scikit-learn
+joblib
+xgboost
 numpy
 pandas
+google-genai
+pydantic
+vaderSentiment
+requests
+python-dotenv

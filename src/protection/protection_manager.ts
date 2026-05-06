@@ -18,6 +18,7 @@ import { AutoPause, AutoPauseConfig } from "./auto_pause";
 import { Drawdown, DrawdownConfig } from "./drawdown";
 import { SlippageGuard, SlippageConfig } from "./slippage_guard";
 import { TradingHours, TradingHoursConfig } from "./trading_hours";
+import { VaultReader } from "../vault/vault_reader";
 import { logger } from "../utils/logger";
 
 export interface ProtectionConfig {
@@ -32,6 +33,7 @@ export class ProtectionManager {
   public drawdown: Drawdown;
   public slippage: SlippageGuard;
   public tradingHours: TradingHours;
+  private vaultReader: VaultReader | null = null;
 
   constructor(config: ProtectionConfig) {
     this.autoPause = new AutoPause(config.autoPause);
@@ -39,6 +41,40 @@ export class ProtectionManager {
     this.slippage = new SlippageGuard(config.slippage);
     this.tradingHours = new TradingHours(config.tradingHours);
     logger.info("Protection manager initialized");
+  }
+
+  attachVaultReader(reader: VaultReader): void {
+    this.vaultReader = reader;
+    logger.info("VaultReader attached to ProtectionManager");
+  }
+
+  getVaultReader(): VaultReader | null {
+    return this.vaultReader;
+  }
+
+  // Returns the capital the bot is actually allowed to deploy for this trade.
+  // Respects: drawdown remaining, per-trade cap, vault balance, vault active flag.
+  // Returns 0 when the vault is paused or empty — caller should skip the trade.
+  async getEffectiveCapital(maxPerTrade: number): Promise<{ capital: number; reason?: string }> {
+    const drawdownStatus = this.drawdown.getStatus();
+    const drawdownRemaining = drawdownStatus.remaining;
+
+    let cap = Math.min(maxPerTrade, drawdownRemaining);
+    if (cap <= 0) return { capital: 0, reason: "daily drawdown exhausted" };
+
+    if (this.vaultReader) {
+      try {
+        const vs = await this.vaultReader.getState();
+        if (!vs.exists) return { capital: 0, reason: "vault not created" };
+        if (!vs.isActive) return { capital: 0, reason: "vault paused by owner" };
+        cap = Math.min(cap, vs.balance);
+        if (cap <= 0) return { capital: 0, reason: "vault empty" };
+      } catch (e: any) {
+        logger.warn({ error: e.message }, "VaultReader read failed — falling back to drawdown cap");
+      }
+    }
+
+    return { capital: cap };
   }
 
   // Run all pre-trade checks
@@ -78,5 +114,17 @@ export class ProtectionManager {
       drawdown: this.drawdown.getStatus(),
       maxSlippageBps: this.slippage.getMaxSlippageBps(),
     };
+  }
+
+  // Runtime config updates
+  updateDrawdownLimit(limit: number): void {
+    this.drawdown.updateLimit(limit);
+  }
+
+  updateTradingHours(startTime: string, endTime: string): void {
+    const startHour = parseInt(startTime.split(":")[0] ?? "0");
+    const endHour = parseInt(endTime.split(":")[0] ?? "23");
+    const enabled = startTime !== "00:00" || endTime !== "23:59";
+    this.tradingHours.update({ enabled, startHour, endHour });
   }
 }

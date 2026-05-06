@@ -4,6 +4,32 @@ network:
   ws_url: "wss://api.devnet.solana.com/"
   cluster: "devnet"               # devnet | mainnet-beta
   explorer_url: "https://explorer.solana.com"
+  mainnet_rpc_url: "https://api.mainnet-beta.solana.com"   # read-only data RPC
+
+# ── AI Data Source ───────────────────────────────────────
+ai:
+  data_source: "mainnet"          # devnet | mainnet  — where regime/GRU/whale features come from
+  target_symbol: "SOL"
+  target_mint_mainnet: "So11111111111111111111111111111111111111112"   # wSOL mainnet
+  backfill_interval: "1h"
+  backfill_candles: 24
+
+binance:
+  base_url: "https://api.binance.com"
+  symbol: "SOLUSDT"
+  interval: "1h"
+
+pyth:
+  sol_usd_account: "H6ARHf6YXhGYeQfUzQNGk6rDNnLBQKrenN712K4AQJEG"
+  hermes_url: "https://hermes.pyth.network"
+  sol_usd_feed_id: "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
+
+# ── Vault program ────────────────────────────────────────
+# Program ID is shared across devnet/mainnet — same program, different clusters.
+# Per-user PDA is derived from ("user_vault", user_pubkey) — no JSON file needed.
+vault:
+  program_id: "Gw6USbf98yEjLLFa9aTeNpQjAvRjuZ2576AVvu3B1g6H"
+  base_mint: "fUSDC"   # which token in devnet_tokens.json to track as the deposit currency
 
 # ── Services ─────────────────────────────────────────────
 redis:
@@ -73,6 +99,23 @@ safety:
   min_unique_holders: 1                # minimum token holders to pass s4 check
   wash_trading_top2_threshold: 1.0     # devnet: we own all tokens, top 2 will always be >95%
                                        # mainnet: set this to 0.95
+
+# ── News Feeds (no API keys required) ───────────────────
+# Polls free sources: CoinDesk RSS, Cointelegraph RSS, GDELT 2.0 (geopolitics).
+# Optional: set CRYPTOPANIC_TOKEN env var to also include CryptoPanic.
+news:
+  enabled: true
+  poll_interval_crypto_ms: 60000        # CoinDesk + Cointelegraph + (optional) CryptoPanic
+  poll_interval_geo_ms: 120000          # GDELT 2.0 + Reuters World fallback
+  recency_decay_minutes: 60             # half-life for headline magnitude weighting
+  crypto_weight: 0.7                    # blend in NewsSignal: cryptoScore vs geoScore
+  geo_weight: 0.3
+  geo_keywords:
+    - "crypto regulation"
+    - "sec crypto"
+    - "fed rate"
+    - "sanctions"
+    - "etf approval"
 
 # ── Whale Tracking ──────────────────────────────────────
 whale_tracking:

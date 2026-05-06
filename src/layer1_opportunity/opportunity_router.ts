@@ -5,7 +5,7 @@ import { logger } from "../utils/logger";
 
 export type Opportunity = ArbOpportunity | LiquidationOpportunity | YieldOpportunity;
 
-export type PathType = "fast" | "slow";
+export type PathType = "fast" | "slow" | "liq";
 
 export interface RoutedOpportunity {
   opportunity: Opportunity;
@@ -24,12 +24,16 @@ export class OpportunityRouter {
         reason = "Arbitrage — atomic flash loan, no capital risk";
         break;
       case "liquidation":
-        path = "fast";
-        reason = "Liquidation — atomic flash loan, no capital risk";
+        path = "liq";
+        reason = "Liquidation — calls programs-lending liquidate instruction";
         break;
       case "yield":
         path = "slow";
-        reason = "Yield farming — requires own capital, AI must confirm";
+        reason = "Yield farming — requires own capital, AI confirmed";
+        break;
+      case "directional":
+        path = "slow";
+        reason = "AI-predicted price movement — single-hop swap with own capital";
         break;
       default:
         path = "slow";
