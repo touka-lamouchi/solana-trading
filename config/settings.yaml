@@ -1,7 +1,8 @@
 # ── Network ──────────────────────────────────────────────
 network:
-  rpc_url: "https://api.devnet.solana.com"
-  ws_url: "wss://api.devnet.solana.com/"
+  rpc_url: "https://devnet.helius-rpc.com/?api-key=ab3a9318-b88e-4b0b-9ec4-557047cc5db8"
+
+  ws_url: "wss://devnet.helius-rpc.com/?api-key=ab3a9318-b88e-4b0b-9ec4-557047cc5db8"
   cluster: "devnet"               # devnet | mainnet-beta
   explorer_url: "https://explorer.solana.com"
   mainnet_rpc_url: "https://api.mainnet-beta.solana.com"   # read-only data RPC
@@ -124,3 +125,6 @@ whale_tracking:
   min_whale_balance_pct: 5             # wallet must hold >= 5% of supply to be "whale"
   accumulation_threshold_pct: 5        # balance delta > +5% = accumulating
   distribution_threshold_pct: 5        # balance delta < -5% = distributing
+
+lending:
+  program_id: "AR6ubTCiWKJYbDaLXiXDWnXogaJCE3dqxpcqQEvUVp8f"

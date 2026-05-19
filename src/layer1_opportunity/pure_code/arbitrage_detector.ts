@@ -186,13 +186,11 @@ export class ArbitrageDetector {
     pool3: PoolState,
     amountIn: number,
   ): ArbOpportunity | null {
-    const forward = this.checkTriangularArb(pool1, pool2, pool3, amountIn);
-    const reverse = this.checkTriangularArb(pool3, pool2, pool1, amountIn);
-
-    if (!forward && !reverse) return null;
-    if (!forward) return reverse;
-    if (!reverse) return forward;
-    return forward.expectedProfit >= reverse.expectedProfit ? forward : reverse;
+    // checkTriangularArb already evaluates both forward and reverse cycles
+    // internally, so we MUST NOT call it again with swapped pool order — pool1
+    // (fUSDC/fSOL), pool2 (fSOL/fRAY), pool3 (fUSDC/fRAY) are positionally
+    // bound. Swapping them produces nonsense profit numbers.
+    return this.checkTriangularArb(pool1, pool2, pool3, amountIn);
   }
 
   // Scan all pools for any arb opportunity

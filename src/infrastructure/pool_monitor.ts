@@ -1,6 +1,8 @@
 import { Connection, PublicKey, AccountInfo } from "@solana/web3.js";
 import { EventEmitter } from "events";
 import { PoolState } from "../layer1_opportunity/pure_code/arbitrage_detector";
+import type { PoolRecord } from "../layer1_opportunity/pure_code/pool_registry";
+import { getConfig } from "../utils/config";
 import { logger } from "../utils/logger";
 
 /**
@@ -96,6 +98,55 @@ export class PoolMonitor extends EventEmitter {
 
   isRunning(): boolean {
     return this.running;
+  }
+
+  /**
+   * Snapshot every tracked pool as a PoolRecord (mint-aware, decimals-aware,
+   * fee-aware). Used by the graph-based arbitrage detector. Returns whatever
+   * states are currently in memory — pools whose initial load failed are
+   * skipped.
+   */
+  getRecords(): PoolRecord[] {
+    const cfg = getConfig();
+    const feeNumerator = cfg.amm?.fee_numerator ?? 997;
+    const feeDenominator = cfg.amm?.fee_denominator ?? 1000;
+
+    const out: PoolRecord[] = [];
+    for (const [key, state] of this.states.entries()) {
+      const pool = this.pools[key];
+      if (!pool) continue;
+      const mintA = this.resolveMint(pool, "A");
+      const mintB = this.resolveMint(pool, "B");
+      if (!mintA || !mintB) continue;
+      const decimalsA = this.resolveDecimals(pool.tokenA);
+      const decimalsB = this.resolveDecimals(pool.tokenB);
+      out.push({
+        poolKey: key,
+        name: state.name ?? key,
+        mintA, mintB,
+        vaultA: pool.tokenAVault,
+        vaultB: pool.tokenBVault,
+        reserveA: state.reserveA,
+        reserveB: state.reserveB,
+        feeNumerator, feeDenominator,
+        decimalsA, decimalsB,
+        symbolA: pool.tokenA,
+        symbolB: pool.tokenB,
+        updatedAt: Date.now(),
+      });
+    }
+    return out;
+  }
+
+  private resolveMint(pool: any, side: "A" | "B"): string | null {
+    // Pools may carry explicit mint fields (used by the dirty pool config).
+    if (side === "A" && pool.tokenAMint) return pool.tokenAMint;
+    if (side === "B" && pool.tokenBMint) return pool.tokenBMint;
+    const symbol: string = side === "A" ? pool.tokenA : pool.tokenB;
+    for (const entry of Object.values(this.tokens) as any[]) {
+      if (entry?.name === symbol && entry?.mint) return entry.mint;
+    }
+    return null;
   }
 
   // ── Private helpers ───────────────────────────────────

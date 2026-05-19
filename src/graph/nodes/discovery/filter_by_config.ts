@@ -12,7 +12,13 @@ export function makeFilterByConfig(_deps: EngineDeps) {
 
     const cfg = state.userConfig;
 
-    const filtered = state.opportunities.filter(opp => {
+    // For arb/liq fast path, opportunities is empty but filteredOpportunities
+    // was pre-populated by the entry point. Use it as the base in that case.
+    const base = state.opportunities.length > 0
+      ? state.opportunities
+      : state.filteredOpportunities;
+
+    const filtered = base.filter(opp => {
       const type = opp.arb.type;
       if (type === "arbitrage" && cfg.flashLoans === false) return false;
       if (type === "yield" && cfg.yieldGaps === false) return false;

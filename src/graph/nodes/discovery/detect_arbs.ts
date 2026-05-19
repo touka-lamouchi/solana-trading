@@ -11,18 +11,23 @@ export function makeDetectArbs(deps: EngineDeps) {
   return async (state: GraphStateType): Promise<Partial<GraphStateType>> => {
     logger.debug({ node: "detect_arbs" }, "graph: detect_arbs");
 
-    // Event-driven path: ArbReactor already populated opportunities via arbEntry.
+    // Fast path: arbEntry already pre-populated filteredOpportunities — skip scan.
+    if (state.filteredOpportunities.length > 0) return {};
+
+    // When poolMonitor is running, ArbReactor handles arb detection event-driven.
+    // Scanning here on signals_timer would duplicate reactor executions.
     if (deps.poolMonitor?.isRunning()) return {};
 
+    // signals_timer path without poolMonitor: scan using graph pool states.
     const p1 = state.poolStates.get("pool1");
     const p2 = state.poolStates.get("pool2");
     const p3 = state.poolStates.get("pool3");
     if (!p1 || !p2 || !p3) return {};
 
     const cfg = getConfig();
-    const borrowAmount = Math.min(100, cfg.capital?.flash_loan_max_usd ?? 100);
+    const borrowAmount = cfg.capital?.flash_loan_max_usd ?? 500;
 
-    const arbs = await deps.arbDetector.scan(deps.pools, [borrowAmount]);
+    const arbs = await deps.arbDetector.scan(deps.pools, [borrowAmount, 500, 1000, 5000]);
 
     const opps: DiscoveredOpportunity[] = arbs.map(arb => ({
       arb,

@@ -136,7 +136,7 @@ async function main() {
     commitment: "confirmed",
   });
 
-  const program = new Program(lendingConfig.idl, new PublicKey(lendingConfig.program_id), provider);
+  const program = new Program(lendingConfig.idl as any, provider);
 
   if (args.list) {
     await listPositions(connection, program as any);

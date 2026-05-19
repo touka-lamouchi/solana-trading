@@ -49,8 +49,8 @@ export class LiquidationReactor {
   // Fallback: Redis reload timer (used when lendingClient is absent)
   private redisReloadTimer: ReturnType<typeof setInterval> | null = null;
 
-  // tokenNameByMint — built once from devnet_tokens.json for chain decode
-  private tokenNameByMint: Record<string, string> = {};
+  // tokenInfoByMint — built once from devnet_tokens.json for chain decode
+  private tokenInfoByMint: Record<string, { name: string; decimals: number }> = {};
 
   constructor(opts: {
     connection: Connection;
@@ -76,7 +76,7 @@ export class LiquidationReactor {
     this.getUserConfig = opts.getUserConfig;
 
     for (const entry of Object.values(this.tokens) as any[]) {
-      if (entry.mint) this.tokenNameByMint[entry.mint] = entry.name;
+      if (entry.mint) this.tokenInfoByMint[entry.mint] = { name: entry.name, decimals: entry.decimals ?? 0 };
     }
   }
 
@@ -132,7 +132,7 @@ export class LiquidationReactor {
 
   private async loadAndSubscribeAll(): Promise<void> {
     if (!this.lendingClient) return;
-    await this.liquidationHunter.loadFromChain(this.tokenNameByMint);
+    await this.liquidationHunter.loadFromChain(this.tokenInfoByMint);
     const positions = this.liquidationHunter.getPositions();
     for (const pos of positions) {
       if (!pos.positionPda) continue;
@@ -141,6 +141,8 @@ export class LiquidationReactor {
       this.subscribePosition(pda);
     }
     logger.debug({ subscribed: this.positionSubs.size }, "LiquidationReactor: positions subscribed");
+    // Immediately evaluate health for all loaded positions.
+    await this.check();
   }
 
   private subscribePosition(pda: PublicKey): void {
@@ -173,7 +175,7 @@ export class LiquidationReactor {
           this.positionSubs.delete(pdaStr);
         }
         // Reload positions to drop it from the in-memory set
-        await this.liquidationHunter.loadFromChain(this.tokenNameByMint);
+        await this.liquidationHunter.loadFromChain(this.tokenInfoByMint);
         logger.info({ pda: pdaStr.slice(0, 12) }, "LiquidationReactor: position liquidated, unsubscribed");
         return;
       }
@@ -188,9 +190,9 @@ export class LiquidationReactor {
   // ── Redis fallback mode ──────────────────────────────────────────────────
 
   private startRedisMode(): void {
-    this.liquidationHunter.loadFromRedis().catch(() => {});
+    this.liquidationHunter.loadFromRedis().then(() => this.check()).catch(() => {});
     this.redisReloadTimer = setInterval(() => {
-      this.liquidationHunter.loadFromRedis().catch(() => {});
+      this.liquidationHunter.loadFromRedis().then(() => this.check()).catch(() => {});
     }, this.RESCAN_MS);
   }
 
@@ -218,7 +220,7 @@ export class LiquidationReactor {
     if (liqs.length === 0) return;
 
     const cfg = getConfig();
-    const borrowAmount = Math.min(100, cfg.capital.flash_loan_max_usd);
+    const borrowAmount = cfg.capital.flash_loan_max_usd ?? 500;
 
     for (const liq of liqs) {
       const poolEntry = this.findPoolWithToken(liq.collateralToken, states);

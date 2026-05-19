@@ -317,11 +317,15 @@ export class UserRegistry {
           : detail.stage === "executed" ? "trade_executed"
           : detail.stage === "safety_rejected" ? "safety_rejected"
           : detail.stage === "guard_rejected" ? "protection_blocked"
+          : detail.stage === "failed" ? "trade_rejected"
           : detail.stage,
       pool: detail.pool,
       pair: detail.opportunity,
       profit: detail.profit,
       reason: detail.reason,
+      reasonCode: detail.reasonCode,        // Phase 4: machine-readable code
+      cyclePath: detail.cyclePath,          // Phase 4: ["fUSDC","fSOL","fRAY","fUSDC"]
+      hops: detail.hops,                    // Phase 4: hop count
       signature: detail.signature,
       oppType: detail.oppType,
       timestamp: now,
@@ -338,6 +342,8 @@ export class UserRegistry {
         profit: detail.profit ?? 0,
         signature: detail.signature ?? "",
         oppType: detail.oppType ?? "unknown",
+        cyclePath: detail.cyclePath ?? null,
+        hops: detail.hops ?? null,
       });
       this.cache.getClient().rpush(key, record).catch(() => {});
       this.cache.getClient().expire(key, 7 * 86400).catch(() => {});
@@ -353,16 +359,11 @@ export class UserRegistry {
     instance.lastTick = result;
     instance.previousDecision = gtr.lastDecision;
 
-    if (instance.config.mode !== "viewer") {
-      instance.tradesToday += result.tradesExecuted;
-      instance.tradesWon += result.details
-        .filter(d => d.stage === "executed" && (d.profit || 0) > 0).length;
-      instance.dailyPnl += result.details
-        .filter(d => d.stage === "executed" && d.profit)
-        .reduce((sum, d) => sum + (d.profit || 0), 0);
-    }
-
+    // executed details were already broadcast (and counted) via engine.onDetail
+    // inside execute_fast/execute_slow. Only broadcast non-executed details here
+    // to avoid double-counting tradesToday/dailyPnl and duplicate WS events.
     for (const detail of result.details) {
+      if (detail.stage === "executed") continue;
       this.broadcastDetail(userId, instance, detail);
     }
   }
@@ -493,6 +494,64 @@ export class UserRegistry {
 
   getActiveUserIds(): string[] {
     return Array.from(this.users.keys());
+  }
+
+  /**
+   * Test the slow-path safety + protection chain against an arbitrary mint.
+   *
+   * Builds a synthetic DiscoveredOpportunity targeting the chosen mint and
+   * pushes it through `engine.handleSlowOpportunity({bypassAiThreshold:true})`.
+   * That method now broadcasts every terminal decision (safety_rejected,
+   * guard_rejected, executed, failed) via onDetail, which drives the WS
+   * pipeline. So the user sees the rejection in the frontend's activity log
+   * exactly the same way real opportunities surface.
+   *
+   * No on-chain transaction is built or submitted unless safety + protection
+   * both pass — and even then, the directional execution path requires a
+   * matching pool and AI decision, which we don't synthesize. Realistic for
+   * dirty/risky mints: they fail at S1/S2/S3/S4 immediately.
+   */
+  async testSlowOpportunity(userId: string, mint: string, opts: { amountIn?: number } = {}): Promise<TickDetail | undefined> {
+    const instance = this.users.get(userId);
+    if (!instance || !instance.running) return undefined;
+
+    const pools = JSON.parse(fs.readFileSync("config/devnet_pools.json", "utf-8"));
+
+    // Find any pool that includes this mint, for S2 honeypot's sell-simulation.
+    let poolEntry: any = null;
+    for (const k of Object.keys(pools)) {
+      const p = pools[k];
+      if (p.tokenAMint === mint || p.tokenBMint === mint) { poolEntry = { key: k, ...p }; break; }
+    }
+
+    // Build the cheapest legal DiscoveredOpportunity for the slow path. Most
+    // fields are placeholders — handleSlowOpportunity only reads `involvedMints`,
+    // `poolStates[0].address`, `arb.amountIn`, `arb.path`, `arb.type`.
+    const stub: any = {
+      arb: {
+        type: "directional",
+        path: `test-slow:${mint.slice(0, 8)}`,
+        tokenIn: "fUSDC",
+        tokenOut: mint.slice(0, 4),
+        amountIn: opts.amountIn ?? 10,
+        expectedProfit: 0,
+        profitPercent: 0,
+        pools: [],
+        timestamp: Date.now(),
+      },
+      poolStates: poolEntry ? [{
+        name: poolEntry.name ?? poolEntry.key,
+        address: poolEntry.address,
+        tokenAVault: poolEntry.tokenAVault,
+        tokenBVault: poolEntry.tokenBVault,
+        reserveA: 0, reserveB: 0, price: 0,
+      }] : [],
+      involvedMints: [mint],
+      poolKeys: poolEntry ? [poolEntry.key] : ["test"],
+      isTriangular: false,
+    };
+
+    return instance.engine.handleSlowOpportunity(stub, new Map(), { bypassAiThreshold: true });
   }
 
   // WebSocket tick listener management

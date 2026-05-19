@@ -27,8 +27,11 @@ import { getConfig } from "../../../src/utils/config";
 import { logger } from "../../../src/utils/logger";
 
 async function main() {
-  const poolKey = process.argv[2] || "pool1";
-  const amountIn = parseFloat(process.argv[3] || "5000");
+  const args = process.argv.slice(2);
+  const reverse = args.includes("--reverse") || args.includes("-r");
+  const positional = args.filter(a => !a.startsWith("-"));
+  const poolKey = positional[0] || "pool1";
+  const amountIn = parseFloat(positional[1] || "5000");
 
   if (!["pool1", "pool2", "pool3"].includes(poolKey)) {
     console.error("pool must be one of: pool1 pool2 pool3");
@@ -47,8 +50,14 @@ async function main() {
   const tokens = JSON.parse(fs.readFileSync("config/devnet_tokens.json", "utf-8"));
   const pool = pools[poolKey];
 
-  const decimalsA = tokens.tokenA.decimals;
-  const amountInRaw = new BN(Math.floor(amountIn * 10 ** decimalsA));
+  // Resolve which token we're spending. Default: tokenA (fUSDC). With --reverse,
+  // spend tokenB of this pool (e.g. fSOL for pool1). Useful when bot wallet is
+  // out of fUSDC but flush with fSOL/fRAY.
+  const tokenBKeyForPool = Object.keys(tokens).find((k) => tokens[k].name === pool.tokenB);
+  if (!tokenBKeyForPool) throw new Error(`Token entry for ${pool.tokenB} not found`);
+  const spendingToken = reverse ? tokens[tokenBKeyForPool] : tokens.tokenA;
+  const decimalsSpending = spendingToken.decimals;
+  const amountInRaw = new BN(Math.floor(amountIn * 10 ** decimalsSpending));
 
   // Read pool reserves before
   const balABefore = await connection.getTokenAccountBalance(new PublicKey(pool.tokenAVault));
@@ -63,18 +72,17 @@ async function main() {
     price: priceBefore.toFixed(4),
   }, "Pool state BEFORE");
 
-  logger.info({ swapping: `${amountIn} ${tokens.tokenA.name} → ${pool.name.split("/")[1]}` },
+  const fromName = reverse ? pool.tokenB : tokens.tokenA.name;
+  const toName = reverse ? tokens.tokenA.name : pool.tokenB;
+  logger.info({ swapping: `${amountIn} ${fromName} → ${toName}`, direction: reverse ? "B→A" : "A→B" },
     "Pushing pool out of equilibrium...");
 
   // Get the user's token accounts dynamically (account config holds them)
   const userTokenA = new PublicKey(tokens.tokenA.account);
-  // For tokenB we look up by pool's tokenB
-  const tokenBKey = Object.keys(tokens).find((k) => tokens[k].name === pool.tokenB);
-  if (!tokenBKey) throw new Error(`Token entry for ${pool.tokenB} not found`);
-  const userTokenB = new PublicKey(tokens[tokenBKey].account);
+  const userTokenB = new PublicKey(tokens[tokenBKeyForPool].account);
 
   const sig = await ammProgram.methods
-    .swap(amountInRaw, new BN(1), true) // a_to_b = true (swap fUSDC into the other token)
+    .swap(amountInRaw, new BN(1), !reverse) // a_to_b: false when --reverse
     .accounts({
       pool: new PublicKey(pool.address),
       tokenAVault: new PublicKey(pool.tokenAVault),

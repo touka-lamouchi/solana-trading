@@ -183,6 +183,20 @@ npx ts-node scripts/devnet/trigger/register_position.ts \
   --collateralToken=fSOL --collateralAmount=5 --debtToken=fUSDC --debtAmount=800 --threshold=1.20
 ```
 
+### Production-grade arb detector (in progress)
+
+The legacy `arbitrage_detector.ts` hardcodes 3 specific pools (`pool1=fUSDC/fSOL,
+pool2=fSOL/fRAY, pool3=fUSDC/fRAY`) by position. That's a devnet shortcut and
+breaks the moment a 4th pool is added or the token mix changes. Rewriting it
+in 4 phases.
+
+| Phase | Scope | Status |
+|---|---|---|
+| **1 — Detector core (pure logic)** | `pool_registry.ts` + `token_graph.ts` + `cycle_finder.ts` (DFS) + `cycle_simulator.ts` (constant-product walk) + `optimal_sizer.ts` (ternary search) + 27 unit tests | **DONE** |
+| **2 — Live pool monitor + reactor wiring** | `pool_monitor.getRecords()` returns mint-aware `PoolRecord[]`; `arb_graph_builder.findRankedCycles()` builds graph, finds + sizes cycles, ranks by net profit; `arb_reactor` now calls the graph finder every pool tick instead of `(p1, p2, p3, borrowAmount)`. `RankedCycle` metadata attached to `DiscoveredOpportunity.cycle` for Phase 3. Legacy positional fields still populated for the existing executor. 32 unit tests. Note: this turn still loads the pool list from `config/devnet_pools.json` — `getProgramAccounts(programs-amm)` discovery comes in Phase 2b once Phase 3 is done. | **DONE** |
+| **3 — Generic N-hop tx builder + executor** | `TransactionBuilder.buildCycleArbTransaction({cycle, pools, ...})` walks the cycle, emits one swap instruction per hop (direction derived from `fromMint` vs `pool.tokenAMint`), wraps in flash-loan + optional profit sweep. `TradingEngine.executeCyclePublic` consumes `opp.cycle.simulation`, applies user/operator capital caps + fee-guard, submits via the same `submitter`. Graph node `execute_fast` switches between the new path and the legacy 3-hop executor based on `opp.cycle` presence — vault-routed paths (`useVaultArb`/`useVaultFlashArb`) still use the legacy executor because the vault Anchor program has fixed 3-hop instruction shapes (a separate phase will generalize them). 37 unit tests passing. | **DONE** |
+| **4 — Pre-flight simulate gate + reject reasons + frontend cycle render** | `executeCycleArb` runs `connection.simulateTransaction` before `submitter.submit`; aborts with `reasonCode: "preflight_sim_failed"` and the first failing program log if simulation reverts. `TickDetail` extended with `reasonCode | cyclePath | hops`. `user_registry.broadcastDetail` emits a new `trade_rejected` event for failed stages and forwards the new fields. Frontend `LiveCockpit.tickToFeedItem` adds a `pathLabel(t)` helper that renders `cyclePath.join(" → ")` for any hop count, plus a `[reasonCode]` badge for rejected trades. `useEngineData` persists `cyclePath` + `hops` on cached trades. 37 unit tests passing. | **DONE** |
+
 ### Other remaining items
 
 | Item | What it needs |

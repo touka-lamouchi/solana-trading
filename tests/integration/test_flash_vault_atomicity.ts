@@ -44,6 +44,7 @@ import {
 } from "@solana/spl-token";
 import fs from "fs";
 import { loadWallet } from "../../src/utils/wallet";
+import { getConfig } from "../../src/utils/config";
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -64,7 +65,7 @@ async function main() {
   //   program and initialize the flash vault. It funds the user wallet
   //   in this test but never borrows or repays — only the user does.
   // ────────────────────────────────────────────────────────────────────────
-  const connection = new Connection("https://api.devnet.solana.com", "confirmed");
+  const connection = new Connection(getConfig().network.rpc_url, "confirmed");
   const devWallet = loadWallet();                       // reads config/dev-wallet.json
 
   // Load configs written by your earlier setup scripts (create_tokens.ts etc.)

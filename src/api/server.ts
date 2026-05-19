@@ -293,6 +293,29 @@ async function boot() {
     res.json(updated);
   });
 
+  // Test the slow-path safety + protection chain against an arbitrary mint.
+  // Body: { mint: string, amountIn?: number }
+  // Emits a safety_rejected / guard_rejected / trade_rejected WS event so the
+  // frontend activity log shows exactly which Sx blocked the trade.
+  app.post("/users/:userId/test-slow-opportunity", async (req, res) => {
+    const { userId } = req.params;
+    const { mint, amountIn } = req.body ?? {};
+    if (!mint || typeof mint !== "string") {
+      res.status(400).json({ error: "mint is required" });
+      return;
+    }
+    try {
+      const detail = await registry.testSlowOpportunity(userId, mint, { amountIn });
+      if (!detail) {
+        res.status(404).json({ error: "user not running" });
+        return;
+      }
+      res.json({ stage: detail.stage, reason: detail.reason, reasonCode: detail.reasonCode });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // List active users
   app.get("/users", (_req, res) => {
     res.json({

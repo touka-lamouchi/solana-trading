@@ -56,9 +56,19 @@ export interface TickDetail {
   opportunity: string;
   stage: "safety_rejected" | "guard_rejected" | "slow_queued" | "executed" | "failed";
   reason?: string;
+  /** Machine-readable reason for failure / rejection (Phase 4):
+   *  fee_guard | preflight_sim_failed | flash_config_missing | tx_rejected |
+   *  not_profitable | safety_s1..s4 | guard_drawdown | guard_hours | guard_pause |
+   *  vault_inactive | vault_empty | unknown */
+  reasonCode?: string;
   profit?: number;
   signature?: string;
   oppType?: string;  // e.g. "arbitrage" | "yield" | "directional" | "social_buzz" | etc.
+  /** Generic cycle path token list for frontend rendering (Phase 4).
+   *  e.g. ["fUSDC","fSOL","fRAY","fUSDC"] */
+  cyclePath?: string[];
+  /** Hop count of the executed/attempted cycle. */
+  hops?: number;
 }
 
 export interface PoolSnapshot {
@@ -399,6 +409,26 @@ export class TradingEngine {
     return this.executeTriangularArb(opp, poolStates);
   }
 
+  /**
+   * Production Arbitrage Phase 3 — generic N-hop executor.
+   *
+   * Used when the opportunity carries a `cycle: RankedCycle` from the new
+   * graph-based finder. Handles any hop count ≥ 2, any token combination, with
+   * the same flash-loan + sweep behavior as the legacy executor for the bot's
+   * default routing path.
+   *
+   * Vault-routed paths (useVaultArb / useVaultFlashArb) still flow through the
+   * legacy 3-hop executor in this turn; a separate generic vault builder is
+   * deferred to a future phase (vault Anchor program currently has fixed
+   * 3-hop instruction shapes and would need its own redesign).
+   */
+  async executeCyclePublic(
+    opp: DiscoveredOpportunity,
+    poolStates: Map<string, PoolState>,
+  ): Promise<TickDetail> {
+    return this.executeCycleArb(opp, poolStates);
+  }
+
   async executeDirectionalTradePublic(
     opp: DiscoveredOpportunity,
     poolStates: Map<string, PoolState>,
@@ -473,25 +503,65 @@ export class TradingEngine {
 
   // ── Public slow-path handler (called by CandleReactor / slowTick) ─
   // Runs AI threshold + S1-S4 safety + protection guard + directional execution.
+  //
+  // Now (Production Arb Phase 4 / safety-visibility): every terminal decision
+  // emits a TickDetail via onDetail so the frontend sees safety_rejected,
+  // protection_blocked, trade_rejected — not just executions. Set
+  // opts.bypassAiThreshold=true to skip the AI gate (used by the
+  // /test-slow-opportunity endpoint to demo safety rejections without waiting
+  // for an AI score crossing).
   async handleSlowOpportunity(
     opp: DiscoveredOpportunity,
     poolStates: Map<string, PoolState>,
-  ): Promise<void> {
-    if (this.userConfig?.mode === "viewer") return;
+    opts: { bypassAiThreshold?: boolean } = {},
+  ): Promise<TickDetail | undefined> {
+    if (this.userConfig?.mode === "viewer") return undefined;
 
     this.reactorOppsFound++;
-    const aiThreshold = this.userConfig?.aiConfidenceThreshold ?? 0.5;
-    if (!this.lastDecision || this.lastDecision.aiScore < aiThreshold) {
-      logger.debug(`  → AI score ${this.lastDecision?.aiScore.toFixed(2) ?? "none"} < ${aiThreshold} — skipping`);
-      return;
+
+    const baseDetail = {
+      pool: opp.poolKeys.join("+"),
+      opportunity: opp.arb.path,
+    };
+
+    if (!opts.bypassAiThreshold) {
+      const aiThreshold = this.userConfig?.aiConfidenceThreshold ?? 0.5;
+      if (!this.lastDecision || this.lastDecision.aiScore < aiThreshold) {
+        const score = this.lastDecision?.aiScore ?? 0;
+        logger.debug(`  → AI score ${score.toFixed(2)} < ${aiThreshold} — skipping`);
+        const d: TickDetail = {
+          ...baseDetail,
+          stage: "failed",
+          oppType: opp.arb.type,
+          reason: `AI score ${score.toFixed(2)} below threshold ${aiThreshold}`,
+          reasonCode: "ai_threshold",
+        };
+        this.onDetail?.(d);
+        return d;
+      }
     }
 
     for (const mint of opp.involvedMints) {
       const poolAddr = opp.poolStates[0]?.address;
       const result = await this.safety.check(mint, poolAddr);
       if (!result.passed) {
-        logger.info(`  → Safety: ${mint.slice(0, 8)}… failed at ${result.failedAt}`);
-        return;
+        const failedAt = result.failedAt ?? "unknown";
+        const stageReason =
+          (result.s1?.failReason) ||
+          (result.s2?.failReason) ||
+          (result.s3?.failReason) ||
+          (result.s4?.failReason) ||
+          `${failedAt} rejected`;
+        logger.info(`  → Safety: ${mint.slice(0, 8)}… failed at ${failedAt} — ${stageReason}`);
+        const d: TickDetail = {
+          ...baseDetail,
+          stage: "safety_rejected",
+          oppType: opp.arb.type,
+          reason: `${failedAt}: ${stageReason}`,
+          reasonCode: `safety_${failedAt.toLowerCase()}`,
+        };
+        this.onDetail?.(d);
+        return d;
       }
     }
 
@@ -500,19 +570,36 @@ export class TradingEngine {
     const effective = await this.protection.getEffectiveCapital(opp.arb.amountIn);
     if (effective.capital < opp.arb.amountIn) {
       logger.info(`  → Capital: BLOCKED — "${effective.reason ?? "capped"}"`);
-      return;
+      const d: TickDetail = {
+        ...baseDetail,
+        stage: "guard_rejected",
+        oppType: opp.arb.type,
+        reason: `Capital blocked: ${effective.reason ?? "insufficient"}`,
+        reasonCode: "guard_capital",
+      };
+      this.onDetail?.(d);
+      return d;
     }
 
     const gate = this.protection.canExecuteTrade(opp.arb.amountIn);
     if (!gate.allowed) {
       logger.info(`  → Guard: BLOCKED — "${gate.reason}"`);
-      return;
+      const d: TickDetail = {
+        ...baseDetail,
+        stage: "guard_rejected",
+        oppType: opp.arb.type,
+        reason: gate.reason ?? "protection blocked",
+        reasonCode: "guard_protection",
+      };
+      this.onDetail?.(d);
+      return d;
     }
 
     const d = await this.executeDirectionalTrade(opp, poolStates);
     d.oppType = opp.arb.type;
     logger.info({ stage: d.stage, profit: d.profit, sig: d.signature?.slice(0, 16) }, "[Event] Slow result");
     this.onDetail?.(d);
+    return d;
   }
 
   // ── AI decision refresh (called by CandleReactor + slowTick) ─────
@@ -1443,6 +1530,211 @@ export class TradingEngine {
   }
 
   // ── Execute a triangular arb via flash loan ────────────
+
+  /**
+   * Generic cycle executor (Production Arbitrage Phase 3).
+   *
+   * Consumes opp.cycle.simulation (the simulator output for the optimal
+   * amountIn) and walks the hops with txBuilder.buildCycleArbTransaction().
+   *
+   * This intentionally skips the vault-routing branches of executeTriangularArb
+   * (those require Anchor program changes for arbitrary hop count). For now,
+   * cycle execution always uses the default flash-loan + profit-sweep path,
+   * which works on devnet today.
+   */
+  private async executeCycleArb(
+    opp: DiscoveredOpportunity,
+    _poolStates: Map<string, PoolState>,
+  ): Promise<TickDetail> {
+    if (!opp.cycle) {
+      return {
+        pool: opp.poolKeys.join("+"),
+        opportunity: opp.arb.path,
+        stage: "failed",
+        reason: "executeCycleArb called without opp.cycle metadata",
+        reasonCode: "missing_cycle",
+      };
+    }
+
+    // Build the cycle path token labels for the frontend / WS event.
+    const cyclePath: string[] = [];
+    if (opp.cycle.cycle.length > 0) {
+      cyclePath.push(opp.cycle.cycle[0]!.symbolIn ?? opp.cycle.cycle[0]!.fromMint.slice(0, 4));
+      for (const e of opp.cycle.cycle) cyclePath.push(e.symbolOut ?? e.toMint.slice(0, 4));
+    }
+    const hopCount = opp.cycle.cycle.length;
+    const baseDetail = {
+      pool: opp.poolKeys.join("+"),
+      opportunity: opp.arb.path,
+      cyclePath,
+      hops: hopCount,
+    };
+
+    const cfg = getConfig();
+    const sim = opp.cycle.simulation;
+    const borrowAmount = opp.cycle.amountIn;
+    const grossProfit = opp.cycle.grossProfit;
+
+    // Cap by both user and operator limits.
+    const userMax = (this.userConfig as any)?.maxTradeUsd;
+    const operatorMax = cfg.capital.flash_loan_max_usd;
+    const cappedBorrow = Math.min(
+      ...[userMax, operatorMax, borrowAmount].filter(
+        (v): v is number => typeof v === "number" && v > 0,
+      ),
+    );
+    if (cappedBorrow < borrowAmount) {
+      logger.info({ cappedBorrow, optimal: borrowAmount }, "  → cycle borrow capped by user/operator");
+    }
+
+    // Network-fee guard (same logic as legacy executor).
+    const minProfitMultiplier = (this.userConfig as any)?.minProfitMultiplier ?? 1.5;
+    const priorityMicroLamports = cfg.fees?.base_priority_fee_microlamports ?? 50_000;
+    const computeUnits = cfg.fees?.flash_loan_compute_units ?? 400_000;
+    const baseFeeSol = 0.000005;
+    const solUsd = 170;
+    const networkFeeUsd = (baseFeeSol + (priorityMicroLamports * computeUnits) / 1e15) * solUsd;
+    const minRequiredProfit = networkFeeUsd * minProfitMultiplier;
+
+    if (grossProfit < minRequiredProfit) {
+      logger.info({
+        borrow: cappedBorrow.toFixed(2),
+        grossProfit: grossProfit.toFixed(4),
+        netProfit: opp.cycle.netProfit.toFixed(4),
+        networkFeeEst: networkFeeUsd.toFixed(4),
+        threshold: minRequiredProfit.toFixed(4),
+      }, "  → Cycle skipped: profit below network-fee guard");
+      return {
+        ...baseDetail,
+        stage: "failed",
+        reason: `Profit $${grossProfit.toFixed(4)} below fee threshold $${minRequiredProfit.toFixed(4)}`,
+        reasonCode: "fee_guard",
+      };
+    }
+
+    let flashCfg: any;
+    try {
+      flashCfg = JSON.parse(fs.readFileSync("config/devnet_flash_vault.json", "utf-8"));
+    } catch {
+      return {
+        ...baseDetail,
+        stage: "failed",
+        reason: "Flash vault config missing — run scripts/devnet/setup/06_setup_flash_vault.ts",
+        reasonCode: "flash_config_missing",
+      };
+    }
+
+    // Optional sweep into vault.
+    const sweepReader = this.protection.getVaultReader();
+    let profitSweep: { vaultPda: PublicKey; baseMint: PublicKey; profitRaw: BN } | undefined;
+    if (sweepReader && grossProfit > 0) {
+      profitSweep = {
+        vaultPda: sweepReader.getVaultPda(),
+        baseMint: new PublicKey(this.tokens.tokenA.mint),
+        profitRaw: new BN(Math.floor(grossProfit * 10 ** this.tokens.tokenA.decimals)),
+      };
+    }
+
+    // Build the hop list expected by the new generic builder.
+    const hops = sim.steps.map(s => ({
+      poolKey: s.poolKey,
+      fromMint: s.fromMint,
+      toMint: s.toMint,
+      amountIn: s.amountIn,
+      amountOut: s.amountOut,
+    }));
+
+    logger.info({
+      hops: hops.length,
+      path: opp.arb.path,
+      borrow: cappedBorrow.toFixed(4),
+      grossProfit: grossProfit.toFixed(4),
+      netProfit: opp.cycle.netProfit.toFixed(4),
+    }, "  → Cycle execution starting");
+
+    let flashTx: import("@solana/web3.js").Transaction;
+    try {
+      flashTx = await this.txBuilder.buildCycleArbTransaction({
+        cycle: hops,
+        pools: this.pools,
+        flashProgram: this.flashProgram,
+        flashConfig: flashCfg.flashConfig,
+        flashVault: flashCfg.vault,
+        borrowAmount: cappedBorrow,
+        borrowDecimals: this.tokens.tokenA.decimals,
+        ...(profitSweep ? { profitSweep } : {}),
+      });
+    } catch (e: any) {
+      logger.warn({ error: e.message }, "  → buildCycleArbTransaction failed");
+      return {
+        ...baseDetail,
+        stage: "failed",
+        reason: `Cycle tx build failed: ${e.message}`,
+        reasonCode: "tx_build_failed",
+      };
+    }
+
+    // Pre-flight simulation gate (Production Arbitrage Phase 4): run the tx
+    // through Solana's simulator BEFORE submitting. If it fails, abort with the
+    // first program log line as the reason — saves the priority fee + signer
+    // round-trip on a tx we know will revert.
+    flashTx.sign(this.userKeypair);
+    try {
+      const sim = await this.connection.simulateTransaction(flashTx);
+      if (sim.value.err) {
+        const errSummary = JSON.stringify(sim.value.err);
+        const firstFailLog = (sim.value.logs ?? []).find(l => /failed|Error/i.test(l)) ?? "";
+        logger.info(
+          { err: errSummary, firstFailLog: firstFailLog.slice(0, 200) },
+          "  → Cycle pre-flight simulation REJECTED",
+        );
+        return {
+          ...baseDetail,
+          stage: "failed",
+          reason: `Pre-flight simulation failed: ${firstFailLog || errSummary}`,
+          reasonCode: "preflight_sim_failed",
+        };
+      }
+      logger.info(
+        { unitsConsumed: sim.value.unitsConsumed ?? "?" },
+        "  → Cycle pre-flight simulation PASSED",
+      );
+    } catch (e: any) {
+      // Simulation RPC itself failed (network, rate limit). Don't block — log
+      // and proceed; submitter has its own error handling.
+      logger.warn({ error: e.message }, "  → Cycle pre-flight simulation RPC errored — proceeding");
+    }
+
+    const measurePubkey = sweepReader
+      ? await sweepReader.getBaseTokenAta()
+      : new PublicKey(this.tokens.tokenA.account);
+    const balBefore = await this.connection.getTokenAccountBalance(measurePubkey);
+    const execResult = await this.submitter.submit(flashTx, 0, "fast");
+
+    if (execResult.success) {
+      const balAfter = await this.connection.getTokenAccountBalance(measurePubkey);
+      const realProfit = parseFloat(balAfter.value.uiAmountString!) -
+        parseFloat(balBefore.value.uiAmountString!);
+
+      logger.info(`  → Cycle EXECUTED profit=+${realProfit.toFixed(4)} fUSDC tx=${execResult.signature?.slice(0, 16)}...`);
+      sweepReader?.invalidate();
+
+      return {
+        ...baseDetail,
+        stage: "executed",
+        profit: realProfit,
+        signature: execResult.signature ?? "",
+      };
+    }
+
+    logger.info(`  → Cycle FAILED: ${execResult.reason}`);
+    return {
+      ...baseDetail,
+      stage: "failed",
+      reason: execResult.reason ?? "unknown error",
+      reasonCode: "tx_rejected",
+    };
+  }
 
   private async executeTriangularArb(
     opp: DiscoveredOpportunity,

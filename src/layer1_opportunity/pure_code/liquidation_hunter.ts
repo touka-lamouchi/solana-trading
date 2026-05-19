@@ -59,29 +59,45 @@ export class LiquidationHunter {
   // Load positions from the programs-lending Anchor program.
   // Each DecodedPosition is mapped to a LoanPosition with on-chain identity
   // fields (positionPda, collateralMint, debtMint) for use in execution.
+  // Raw u64 collateral/debt amounts are converted to whole tokens using each
+  // mint's decimals — applyPrices later multiplies by price-per-whole-token.
   async loadFromChain(
-    tokenNameByMint: Record<string, string>,
+    tokenInfoByMint: Record<string, { name: string; decimals: number }>,
   ): Promise<void> {
     if (!this.lendingClient) return;
     try {
       const onChain: DecodedPosition[] = await this.lendingClient.getActivePositions();
-      const fresh: LoanPosition[] = onChain.map(pos => ({
-        borrower: pos.borrower.toBase58(),
-        collateralToken: tokenNameByMint[pos.collateralMint.toBase58()] ?? pos.collateralMint.toBase58(),
-        debtToken: tokenNameByMint[pos.debtMint.toBase58()] ?? pos.debtMint.toBase58(),
-        // Convert raw lamports/units to human amounts with 9 decimals for fSOL, 6 for fUSDC.
-        // The execution path reads back collateralAmount from the opportunity for profit calc.
-        collateralAmount: Number(pos.collateralAmount),
-        debtAmount: Number(pos.debtAmount),
-        collateralPrice: 1.0,
-        debtPrice: 1.0,
-        liquidationThreshold: Number(pos.thresholdBps) / 10_000,
-        positionPda: pos.pda.toBase58(),
-        collateralMint: pos.collateralMint.toBase58(),
-        debtMint: pos.debtMint.toBase58(),
-      }));
+      const fresh: LoanPosition[] = onChain.map(pos => {
+        const cMint = pos.collateralMint.toBase58();
+        const dMint = pos.debtMint.toBase58();
+        const cInfo = tokenInfoByMint[cMint];
+        const dInfo = tokenInfoByMint[dMint];
+        const cDecimals = cInfo?.decimals ?? 0;
+        const dDecimals = dInfo?.decimals ?? 0;
+        return {
+          borrower: pos.borrower.toBase58(),
+          collateralToken: cInfo?.name ?? cMint,
+          debtToken: dInfo?.name ?? dMint,
+          collateralAmount: Number(pos.collateralAmount) / Math.pow(10, cDecimals),
+          debtAmount: Number(pos.debtAmount) / Math.pow(10, dDecimals),
+          collateralPrice: 1.0,
+          debtPrice: 1.0,
+          liquidationThreshold: Number(pos.thresholdBps) / 10_000,
+          positionPda: pos.pda.toBase58(),
+          collateralMint: cMint,
+          debtMint: dMint,
+        };
+      });
       this.positions = fresh;
-      logger.debug({ count: fresh.length }, "LiquidationHunter: loaded positions from chain");
+      logger.info({
+        count: fresh.length,
+        positions: fresh.map(p => ({
+          pda: p.positionPda?.slice(0, 12),
+          collat: `${p.collateralAmount} ${p.collateralToken}`,
+          debt: `${p.debtAmount} ${p.debtToken}`,
+          threshold: p.liquidationThreshold,
+        })),
+      }, "LiquidationHunter: loaded positions from chain");
     } catch (e: any) {
       logger.warn({ error: e.message }, "LiquidationHunter: failed to load from chain");
     }
@@ -140,6 +156,19 @@ export class LiquidationHunter {
 
   scan(): LiquidationOpportunity[] {
     const opportunities: LiquidationOpportunity[] = [];
+
+    if (this.positions.length > 0) {
+      logger.info({
+        scan: this.positions.map(p => ({
+          pda: p.positionPda?.slice(0, 12),
+          collat: `${p.collateralAmount} ${p.collateralToken}@${p.collateralPrice}`,
+          debt: `${p.debtAmount} ${p.debtToken}@${p.debtPrice}`,
+          health: this.calculateHealthRatio(p).toFixed(4),
+          threshold: p.liquidationThreshold,
+          willLiq: this.calculateHealthRatio(p) < p.liquidationThreshold,
+        })),
+      }, "LiquidationHunter.scan: per-position breakdown");
+    }
 
     for (const position of this.positions) {
       const healthRatio = this.calculateHealthRatio(position);

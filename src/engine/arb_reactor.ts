@@ -1,5 +1,6 @@
 import { PoolMonitor } from "../infrastructure/pool_monitor";
 import { ArbitrageDetector, ArbOpportunity, PoolState } from "../layer1_opportunity/pure_code/arbitrage_detector";
+import { findRankedCycles, cycleLabel, type RankedCycle } from "../layer1_opportunity/pure_code/arb_graph_builder";
 import { getConfig } from "../utils/config";
 import { logger } from "../utils/logger";
 import type { ArbOpportunityEvent } from "../graph/events";
@@ -10,6 +11,13 @@ export interface DiscoveredOpportunity {
   involvedMints: string[];
   poolKeys: string[];
   isTriangular: boolean;
+  /**
+   * New (Production Arbitrage Phase 2): graph-based cycle metadata.
+   * Set when the opportunity came from the dynamic finder. Phase 3 executor
+   * will consume this directly. Phase 2 leaves the legacy fields populated
+   * so the existing `executeTriangularArbPublic` path keeps working.
+   */
+  cycle?: RankedCycle;
 }
 
 /**
@@ -30,6 +38,8 @@ export interface DiscoveredOpportunity {
  */
 export class ArbReactor {
   private poolMonitor: PoolMonitor;
+  /** Retained for backwards-compat with constructors in trading_engine.ts;
+   *  no longer consulted now that the graph-based finder replaces it. */
   private arbDetector: ArbitrageDetector;
   private tokens: any;
   private enqueue: (event: ArbOpportunityEvent) => void;
@@ -75,33 +85,122 @@ export class ArbReactor {
     if (userConfig?.flashLoans === false) return;
     if (userConfig?.mode === "viewer") return;
 
-    const states = this.poolMonitor.getAllStates();
-    const p1 = states.get("pool1");
-    const p2 = states.get("pool2");
-    const p3 = states.get("pool3");
-    if (!p1 || !p2 || !p3) return;
+    // Resolve base mint (fUSDC by default — what the flash-loan vault holds).
+    const baseMint = this.tokens?.tokenA?.mint;
+    if (!baseMint) return;
+
+    // Build the graph fresh from the live pool snapshot every check. Cheap.
+    const records = this.poolMonitor.getRecords();
+    if (records.length === 0) return;
 
     const cfg = getConfig();
-    const borrowAmount = Math.min(100, cfg.capital.flash_loan_max_usd);
+    const userMaxTrade = typeof userConfig?.maxTradeUsd === "number" ? userConfig.maxTradeUsd : Infinity;
+    const flashCap = cfg.capital?.flash_loan_max_usd ?? 1000;
+    const minProfitMultiplier = typeof userConfig?.minProfitMultiplier === "number"
+      ? userConfig.minProfitMultiplier
+      : 1.5;
 
-    const arb = this.arbDetector.checkTriangularArbFromStates(p1, p2, p3, borrowAmount);
-    if (!arb) return;
+    const ranked = findRankedCycles(records, {
+      baseMint,
+      minIn: 1,
+      maxIn: Math.min(userMaxTrade, flashCap),
+      // Estimated total fee per cycle in fUSDC. Conservative default; Phase 4
+      // will replace with a live FeeCalculator estimate.
+      estimatedFeeBase: 0.05,
+      minProfitMultiplier,
+      minDepth: 2,
+      maxDepth: 4,
+      maxCycles: 256,
+    });
 
-    this.lastSubmission = now; // optimistic lock before enqueue
+    if (ranked.length === 0) {
+      // Diagnostic: when nothing clears the gate, log a small summary so the
+      // user can tell whether the gap is too small or the fee gate is too tight.
+      // Run a single cycle simulation at maxIn to surface the headline gross
+      // profit even when net is negative.
+      const { findCycles: _fc } = await import("../layer1_opportunity/pure_code/cycle_finder");
+      const { simulateCycle: _sc } = await import("../layer1_opportunity/pure_code/cycle_simulator");
+      const { buildGraph: _bg } = await import("../layer1_opportunity/pure_code/arb_graph_builder");
+      const probeAmount = Math.min(userMaxTrade, flashCap);
+      const probeGraph = _bg(records);
+      const probeCycles = _fc(probeGraph, baseMint, { minDepth: 2, maxDepth: 4, maxCycles: 64 });
+      let bestProbeGross = -Infinity;
+      let bestProbeHops = 0;
+      for (const c of probeCycles) {
+        const sim = _sc(c, probeAmount);
+        if (sim && sim.grossProfit > bestProbeGross) {
+          bestProbeGross = sim.grossProfit;
+          bestProbeHops = c.length;
+        }
+      }
+      logger.info(
+        {
+          pools: records.length,
+          cycles: probeCycles.length,
+          probeAmount: probeAmount.toFixed(0),
+          bestGrossAtMaxIn: isFinite(bestProbeGross) ? bestProbeGross.toFixed(4) : "n/a",
+          bestHops: bestProbeHops,
+          minProfitMultiplier,
+        },
+        "ArbReactor: no profitable cycles this tick (diagnostic probe)",
+      );
+      return;
+    }
+    const best = ranked[0]!;
+
+    // Backwards-compatible legacy ArbOpportunity payload — Phase 3 executor
+    // will switch to consuming `opp.cycle` directly.
+    const states = this.poolMonitor.getAllStates();
+    const poolKeys = best.cycle.map(e => e.poolKey);
+    const poolStates: PoolState[] = poolKeys
+      .map(k => states.get(k))
+      .filter((s): s is PoolState => Boolean(s));
+    const involvedMints = uniqueMints(best, baseMint);
+
+    const arb: ArbOpportunity = {
+      type: "arbitrage",
+      path: cycleLabel(best.cycle),
+      tokenIn: best.cycle[0]!.symbolIn ?? best.cycle[0]!.fromMint,
+      tokenOut: best.cycle[best.cycle.length - 1]!.symbolOut ?? best.cycle[best.cycle.length - 1]!.toMint,
+      amountIn: best.amountIn,
+      expectedProfit: best.netProfit,
+      profitPercent: (best.netProfit / Math.max(best.amountIn, 1e-9)) * 100,
+      pools: poolStates,
+      timestamp: Date.now(),
+    };
+
+    this.lastSubmission = now;
 
     logger.info(
-      { path: arb.path, profit: arb.expectedProfit.toFixed(4), pct: arb.profitPercent.toFixed(2) },
-      "ArbReactor: opportunity detected — enqueuing",
+      {
+        path: arb.path,
+        amountIn: arb.amountIn.toFixed(4),
+        netProfit: best.netProfit.toFixed(4),
+        gross: best.grossProfit.toFixed(4),
+        hops: best.cycle.length,
+        candidates: ranked.length,
+      },
+      "ArbReactor: cycle detected — enqueuing",
     );
 
     const opp: DiscoveredOpportunity = {
       arb,
-      poolStates: [p1, p2, p3],
-      involvedMints: [this.tokens.tokenB.mint, this.tokens.tokenC.mint],
-      poolKeys: ["pool1", "pool2", "pool3"],
-      isTriangular: true,
+      poolStates,
+      involvedMints,
+      poolKeys,
+      isTriangular: best.cycle.length === 3,
+      cycle: best,
     };
 
     this.enqueue({ kind: "arb_opportunity", userId: this.userId, opp, poolStates: states, enqueuedAt: Date.now() });
   }
+}
+
+function uniqueMints(rc: RankedCycle, baseMint: string): string[] {
+  const seen = new Set<string>();
+  for (const edge of rc.cycle) {
+    if (edge.fromMint !== baseMint) seen.add(edge.fromMint);
+    if (edge.toMint !== baseMint) seen.add(edge.toMint);
+  }
+  return Array.from(seen);
 }

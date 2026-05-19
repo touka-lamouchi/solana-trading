@@ -12,13 +12,30 @@ export function makeDetectLiquidations(deps: EngineDeps) {
     logger.debug({ node: "detect_liquidations" }, "graph: detect_liquidations");
 
     if (state.userConfig.liquidations === false) return {};
-    if (deps.poolMonitor?.isRunning()) return {}; // LiquidationReactor handles it
 
-    await deps.liquidationHunter.loadFromRedis();
+    // Fast path: liqEntry pre-populated filteredOpportunities — skip scan.
+    if (state.filteredOpportunities.length > 0) return {};
+
+    // signals_timer path: use poolMonitor live states when available.
+    // Prefer on-chain positions when LendingClient is attached; otherwise
+    // fall back to the legacy Redis registry.
+    if (deps.lendingClient) {
+      const tokenInfoByMint: Record<string, { name: string; decimals: number }> = {};
+      for (const entry of Object.values(deps.tokens) as any[]) {
+        if (entry.mint) tokenInfoByMint[entry.mint] = { name: entry.name, decimals: entry.decimals ?? 0 };
+      }
+      await deps.liquidationHunter.loadFromChain(tokenInfoByMint);
+    } else {
+      await deps.liquidationHunter.loadFromRedis();
+    }
 
     const priceMap: Record<string, number> = { fUSDC: 1.0 };
-    const p1 = state.poolStates.get("pool1");
-    const p3 = state.poolStates.get("pool3");
+    const p1 = deps.poolMonitor?.isRunning()
+      ? deps.poolMonitor.getState("pool1")
+      : state.poolStates.get("pool1");
+    const p3 = deps.poolMonitor?.isRunning()
+      ? deps.poolMonitor.getState("pool3")
+      : state.poolStates.get("pool3");
     if (p1 && p1.reserveB > 0) priceMap[deps.tokens.tokenB.name] = p1.reserveA / p1.reserveB;
     if (p3 && p3.reserveB > 0) priceMap[deps.tokens.tokenC.name] = p3.reserveA / p3.reserveB;
     deps.liquidationHunter.applyPrices(priceMap);
@@ -47,6 +64,17 @@ export function makeDetectLiquidations(deps: EngineDeps) {
         pools: [poolForCollateral.state],
         timestamp: Date.now(),
       };
+
+      // Attach on-chain identity so execute_liq can find the position PDA.
+      if (liq.positionPda && liq.collateralMint && liq.debtMint) {
+        (liqOpp as any).liqMeta = {
+          positionPda: liq.positionPda,
+          collateralMint: liq.collateralMint,
+          debtMint: liq.debtMint,
+          collateralAmount: liq.collateralAmount,
+          debtAmount: liq.debtAmount,
+        };
+      }
 
       opps.push({
         arb: liqOpp,

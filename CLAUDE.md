@@ -98,11 +98,26 @@ When `ai.data_source: "mainnet"`, AI signals are populated under the **mainnet**
 ```
 src/
   engine/
-    trading_engine.ts          # executeTriangularArbPublic + executeDirectionalTradePublic
-                               # startReactors() (API mode) + startLoop() (single-user)
-                               # exposeDetectors() for EngineDeps wiring
-                               # Fee guard + per-trade cap precedence + signal/trade bridge
-    arb_reactor.ts             # Subscribes to PoolMonitor; enqueues arb_opportunity events
+    trading_engine.ts          # executeTriangularArbPublic (legacy 3-hop) +
+                               # executeCyclePublic (Production Arb Phase 3 —
+                               # generic N-hop, consumes opp.cycle.simulation) +
+                               # executeDirectionalTradePublic +
+                               # executeLiquidationPublic.
+                               # startReactors() (API mode) + startLoop() (single-user).
+                               # exposeDetectors() for EngineDeps wiring.
+                               # Fee guard + per-trade cap precedence + signal/trade bridge.
+                               # Production Arb Phase 4: pre-flight simulateTransaction
+                               # gate before submit (aborts with reasonCode=preflight_sim_failed
+                               # on revert); structured reasonCode + cyclePath + hops
+                               # on every TickDetail return.
+    arb_reactor.ts             # Subscribes to PoolMonitor. Builds a fresh
+                               # TokenGraph from poolMonitor.getRecords() each
+                               # tick, runs findRankedCycles() (graph-based
+                               # arbitrage finder), enqueues the best cycle as
+                               # arb_opportunity. Carries `cycle` metadata
+                               # (RankedCycle) for the Phase 3 generic executor;
+                               # legacy `poolStates / involvedMints / poolKeys`
+                               # also populated so the Phase 1 executor still works.
     liquidation_reactor.ts     # Subscribes to PoolMonitor; enqueues liq_opportunity events
   main.ts                      # Single-user boot (legacy poll mode, no graph)
   api/
@@ -144,7 +159,9 @@ src/
         log_whale_signals.ts   # Logs whale + mempool context before execution
         check_guard_fast.ts    # ProtectionManager.canExecuteTrade (fast path)
         check_vault.ts         # VaultReader balance gate
-        execute_fast.ts        # engine.executeTriangularArbPublic
+        execute_fast.ts        # When opp.cycle is set and user isn't on a vault-routed
+                               # path: engine.executeCyclePublic (generic N-hop).
+                               # Otherwise: engine.executeTriangularArbPublic (legacy).
         check_ai_threshold.ts  # aiScore gate for slow path
         check_safety.ts        # SafetyPipeline S1→S4
         check_guard_slow.ts    # ProtectionManager.canExecuteTrade (slow path)
@@ -154,7 +171,27 @@ src/
       utils.ts
   layer1_opportunity/
     pure_code/
-      arbitrage_detector.ts    # Triangular arb math
+      arbitrage_detector.ts    # Legacy triangular arb math (3 hardcoded pools).
+                               # Being replaced by graph-based detector below
+                               # (Phase 1 of production rewrite — see Production Arbitrage).
+      pool_registry.ts         # PoolRegistry — in-memory cache of all known
+                               # pools, keyed by PDA. Pure logic.
+      token_graph.ts           # TokenGraph — adjacency map keyed by mint;
+                               # bidirectional pool edges with reserves +
+                               # decimals oriented per direction.
+      cycle_finder.ts          # findCycles(graph, baseMint, {min,maxDepth}) —
+                               # DFS enumeration of closed cycles starting and
+                               # ending at base. Both traversal directions kept.
+      cycle_simulator.ts       # simulateCycle(edges[], amountIn) — exact
+                               # constant-product walk with per-pool fees.
+                               # Returns null on broken / non-closed cycles.
+      optimal_sizer.ts         # findOptimalSize(cycle, opts) — ternary search
+                               # for amountIn maximizing net profit; rejects
+                               # if margin doesn't clear minProfitMultiplier × fee.
+      arb_graph_builder.ts     # buildGraph(pools[]) + findRankedCycles(pools, opts)
+                               # → ranked profitable cycles, each with optimal
+                               # amountIn + simulator output. Pure logic. This
+                               # is what ArbReactor calls every pool tick.
       liquidation_hunter.ts    # Reads loan registry from Redis,
                                # applyPrices() updates from real pool reserves
       yield_rate_monitor.ts    # Empty until DefiLlama is wired
@@ -178,9 +215,12 @@ src/
     decision_model.ts          # 5-signal Promise.all + weighted aggregation
   layer2_execution/
     route_planner.ts
-    transaction_builder.ts     # 5 builders:
+    transaction_builder.ts     # 6 builders:
                                #   buildSwapTransaction (raw AMM)
-                               #   buildFlashLoanArbTransaction (+ optional sweep)
+                               #   buildFlashLoanArbTransaction (legacy, hardcoded
+                               #     to 3-hop SwapRoute)
+                               #   buildCycleArbTransaction (Production Arb Phase 3:
+                               #     generic over hop count, walks PoolEdge cycles)
                                #   buildVaultSwapTransaction (vault.bot_swap CPI)
                                #   buildVaultArbTransaction (vault.bot_arb)
                                #   buildVaultArbViaFlashTransaction (vault.bot_arb_via_flash)
@@ -215,8 +255,11 @@ src/
     mainnet_rpc.ts             # Mainnet read-only RPC for AI sensors
     mempool_monitor.ts         # onLogs(Raydium V4, Orca Whirlpool) on mainnet
                                # writes pressure to Redis (no synthetic injection)
-    pool_monitor.ts            # accountSubscribe on all pool vault accounts
-                               # notifies ArbReactor + LiquidationReactor on reserve changes
+    pool_monitor.ts            # accountSubscribe on all pool vault accounts.
+                               # Notifies ArbReactor + LiquidationReactor on
+                               # reserve changes. getRecords() returns
+                               # PoolRecord[] (mint-aware, decimals-aware,
+                               # fee-aware) for the graph-based arb finder.
     candle_reactor.ts          # Binance WebSocket 1-min candles; emits candle_closed
     dex_listener.ts
   ingestion/
@@ -352,6 +395,11 @@ src/
 
 WebSocket trade events include `oppType` so the frontend can render the right type badge + route badge.
 
+Production Arbitrage Phase 4 adds three more fields to every `trade_executed` and the new `trade_rejected` event:
+- `cyclePath: string[]` — token symbols including the start, e.g. `["fUSDC","fSOL","fRAY","fUSDC"]`. Used by LiveCockpit to render arrows for any hop count (no longer assumes 3).
+- `hops: number` — hop count of the cycle.
+- `reasonCode: string` — machine-readable code for failures: `fee_guard | preflight_sim_failed | flash_config_missing | tx_build_failed | tx_rejected | missing_cycle`. Frontend shows the code in `[brackets]` next to the human reason.
+
 ### UserConfig fields
 
 `dailyLimitUsd`, `maxTradeUsd`, `tradingHoursStart/End`, `flashLoans`, `yieldGaps`, `liquidations`, `chartPatterns`, `socialBuzz`, `copyWhales`, `useVaultArb`, `useVaultFlashArb`, `minProfitMultiplier`, `mode`.
@@ -380,6 +428,10 @@ WebSocket trade events include `oppType` so the frontend can render the right ty
 | Graph Phase 4 — Reactors as pure event sources | DONE — ArbReactor + LiquidationReactor enqueue; CandleReactor fans out |
 | Graph Phase 5 — Concurrency hardening | DONE — bounded queue, drop policy, metrics on /status, drain/stop, integration tests |
 | Graph Phase 6 — Honest liquidation | DONE — programs-lending Anchor program, LendingClient, execute_liq node, accountSubscribe reactor |
+| Production Arbitrage Phase 1 — Graph-based detector core | DONE — pool_registry, token_graph, cycle_finder (DFS), cycle_simulator, optimal_sizer + 27 unit tests passing |
+| Production Arbitrage Phase 2 — Dynamic pool monitor + reactor wiring | DONE — pool_monitor.getRecords(), arb_graph_builder.findRankedCycles(), arb_reactor rewritten to graph-based finder. RankedCycle metadata attached to DiscoveredOpportunity for Phase 3. Legacy positional executor still works (pre-Phase-3). 32 unit tests passing |
+| Production Arbitrage Phase 3 — Generic N-hop tx builder + executor | DONE — TransactionBuilder.buildCycleArbTransaction (any hop count, derives a_to_b per edge), TradingEngine.executeCyclePublic + private executeCycleArb (flash-loan + sweep), graph execute_fast routes to it when opp.cycle is set and user isn't on vault-routed paths. Legacy executor preserved as fallback. 37 unit tests passing |
+| Production Arbitrage Phase 4 — Pre-flight simulate gate + reject reasons + frontend cycle render | DONE — TickDetail carries reasonCode (machine-readable) + cyclePath + hops; executeCycleArb runs simulateTransaction before submit and aborts with `preflight_sim_failed` reasonCode if it fails; user_registry emits the new fields in WS events as a `trade_rejected` type for failed cycles; LiveCockpit renders generic N-token cycle paths and surfaces reasonCode badges in the activity log; useEngineData stores cyclePath + hops on persisted trades. 37 unit tests still passing |
 | 14 Production deployment | NOT STARTED |
 
 ## Removed (no fake data anywhere)

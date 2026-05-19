@@ -113,7 +113,7 @@ export class LendingClient {
     const results: DecodedPosition[] = [];
     for (const { pubkey, account } of accounts) {
       try {
-        const pos = (this.program as any).coder.accounts.decode("LoanPosition", account.data);
+        const pos = (this.program as any).coder.accounts.decode("loanPosition",account.data);
         if (pos.isLiquidated) continue;
         results.push({
           pda: pubkey,
@@ -138,7 +138,7 @@ export class LendingClient {
   /** Decode a single raw account buffer into a DecodedPosition (for accountSubscribe callbacks). */
   decodePosition(pda: PublicKey, data: Buffer): DecodedPosition | null {
     try {
-      const pos = (this.program as any).coder.accounts.decode("LoanPosition", data);
+      const pos = (this.program as any).coder.accounts.decode("loanPosition",data);
       return {
         pda,
         borrower: pos.borrower,
