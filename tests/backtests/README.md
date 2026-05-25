@@ -11,16 +11,26 @@ fabricated.
 |---|---|
 | `harness.ts` | Tiny reusable framework: feed a snapshot series → collect decisions → summarize. |
 | `binance_data.ts` | Fetches real `SOLUSDT` klines from Binance (public API, no key). Falls back to a deterministic synthetic series when offline. |
+| `arb_scenario.ts` | Shared triangle-pool builder + single-candle arb detector, reused by the arb backtests. |
 | `test_arb_backtest.ts` | Backtests the **arbitrage cycle finder** on real Binance prices. |
+| `test_fee_sweep_backtest.ts` | Sweeps the **fee-guard** `minProfitMultiplier` (1.0/1.5/2.0/3.0) → tradeoff curve (fewer trades vs higher quality). |
+| `test_walkforward_backtest.ts` | **Walk-forward / out-of-sample**: tunes the fee gate on a train window, evaluates on an unseen test window (anti-overfit). |
+| `test_signal_agreement_backtest.ts` | Backtests the **ASI01 signal-agreement gate**: under simulated sensor manipulation, shows the gate skips losing trades and lifts win rate. |
 
 ## Run
 
 ```bash
-# Arbitrage cycle finder on real Binance data
-npx ts-node tests/backtests/test_arb_backtest.ts
+npx ts-node tests/backtests/test_arb_backtest.ts              # arb finder, real data
+npx ts-node tests/backtests/test_fee_sweep_backtest.ts        # fee-guard sensitivity
+npx ts-node tests/backtests/test_walkforward_backtest.ts      # out-of-sample rigor
+npx ts-node tests/backtests/test_signal_agreement_backtest.ts # ASI01 security value
 ```
 
-Exits non-zero on assertion failure, so it doubles as a regression test.
+Each exits non-zero on assertion failure, so they double as regression tests.
+
+The signal-agreement backtest runs fully **without** the AI server (deterministic
+synthetic sensors). If `localhost:8000` is up it also probes the live sentiment
+path, but that does not affect the result.
 
 ## How the arb backtest works
 

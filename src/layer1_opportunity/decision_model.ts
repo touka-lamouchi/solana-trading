@@ -43,6 +43,24 @@ export interface DecisionResult {
   disagreementReason?: string;
 }
 
+// Exported pure agreement math (ASI01) — used by DecisionModel and backtests so
+// both exercise the identical logic. Agreement = 1 - 2*stddev(scores), clamped
+// to [0,1]; scores are each in [0,1] around a 0.5 neutral.
+export function computeSignalAgreement(scores: number[]): { agreement: number; reason?: string } {
+  if (scores.length < 2) return { agreement: 1 };
+  const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
+  const variance = scores.reduce((a, b) => a + (b - mean) ** 2, 0) / scores.length;
+  const std = Math.sqrt(variance);
+  const agreement = Math.max(0, Math.min(1, 1 - 2 * std));
+  const bullish = scores.filter((s) => s > 0.6).length;
+  const bearish = scores.filter((s) => s < 0.4).length;
+  const reason = bullish > 0 && bearish > 0 ? `${bullish} bullish vs ${bearish} bearish sensors` : undefined;
+  return { agreement, ...(reason ? { reason } : {}) };
+}
+
+/** Floor below which a multi-sensor decision is considered unreliable. */
+export const AGREEMENT_FLOOR = 0.5;
+
 export class DecisionModel {
   private lstmSignal: LSTMSignal;
   private sentimentSignal: SentimentSignal;
@@ -164,7 +182,6 @@ export class DecisionModel {
     if (news) presentScores.push(newsScore);
 
     const { agreement, reason: disagreementReason } = this.computeAgreement(presentScores);
-    const AGREEMENT_FLOOR = 0.5; // below this, signals contradict too much to trust
     const reliable = presentScores.length >= 2 ? agreement >= AGREEMENT_FLOOR : true;
 
     // 5. Determine overall direction
@@ -226,22 +243,8 @@ export class DecisionModel {
     return result;
   }
 
-  // Agreement = 1 - 2*stddev(scores), clamped to [0,1]. With scores in [0,1],
-  // max meaningful spread is ~0.5, so 2*stddev maps a fully-split set toward 0.
   private computeAgreement(scores: number[]): { agreement: number; reason?: string } {
-    if (scores.length < 2) return { agreement: 1 };
-    const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
-    const variance = scores.reduce((a, b) => a + (b - mean) ** 2, 0) / scores.length;
-    const std = Math.sqrt(variance);
-    const agreement = Math.max(0, Math.min(1, 1 - 2 * std));
-    // Flag the specific split: are some sensors bullish (>0.6) while others bearish (<0.4)?
-    const bullish = scores.filter((s) => s > 0.6).length;
-    const bearish = scores.filter((s) => s < 0.4).length;
-    const reason =
-      bullish > 0 && bearish > 0
-        ? `${bullish} bullish vs ${bearish} bearish sensors`
-        : undefined;
-    return { agreement, ...(reason ? { reason } : {}) };
+    return computeSignalAgreement(scores);
   }
 
   private directionToScore(lstm: LSTMSignalResult | null): number {
