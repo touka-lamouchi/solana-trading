@@ -46,10 +46,48 @@ export class CandleFetcher {
     return `candle:${mint}:${timeframe}`;
   }
 
+  // Data-poisoning guard (OWASP LLM04 — Data & Model Poisoning).
+  // Candles feed the regime/vol models that drive trades, so reject structurally
+  // impossible or extreme candles before they enter the feature window. A bad
+  // candle (manipulated reserves, spoofed price) silently poisons predictions.
+  static validateCandle(c: Candle, prev: Candle | null): { ok: boolean; reason?: string } {
+    const fields = [c.open, c.high, c.low, c.close, c.volume];
+    if (fields.some((v) => typeof v !== "number" || !Number.isFinite(v))) {
+      return { ok: false, reason: "non-finite field" };
+    }
+    if (c.open <= 0 || c.high <= 0 || c.low <= 0 || c.close <= 0) {
+      return { ok: false, reason: "non-positive price" };
+    }
+    if (c.volume < 0) return { ok: false, reason: "negative volume" };
+    // OHLC integrity: high must bound everything, low must floor everything.
+    if (c.high < c.low) return { ok: false, reason: "high < low" };
+    if (c.high < c.open || c.high < c.close) return { ok: false, reason: "high below open/close" };
+    if (c.low > c.open || c.low > c.close) return { ok: false, reason: "low above open/close" };
+    // Outlier gate: reject a >10x jump vs the previous close (likely spoofed).
+    if (prev && prev.close > 0) {
+      const ratio = c.close / prev.close;
+      if (ratio > 10 || ratio < 0.1) {
+        return { ok: false, reason: `extreme price jump x${ratio.toFixed(2)}` };
+      }
+    }
+    return { ok: true };
+  }
+
   async appendCandle(mint: string, timeframe: string, candle: Candle): Promise<void> {
     const key = this.candleKey(mint, timeframe);
     const raw = await this.redis.get(key);
     const candles: Candle[] = raw ? JSON.parse(raw) : [];
+
+    const prev = candles.length ? candles[candles.length - 1]! : null;
+    const check = CandleFetcher.validateCandle(candle, prev);
+    if (!check.ok) {
+      // Drop the poisoned candle rather than corrupt the feature window.
+      // (Imported lazily to avoid a hard logger dep in pure-feature contexts.)
+      const { logger } = await import("../utils/logger");
+      logger.warn({ mint, timeframe, reason: check.reason, candle }, "Rejected invalid candle (LLM04 guard)");
+      return;
+    }
+
     candles.push(candle);
     if (candles.length > MAX_CANDLES) candles.splice(0, candles.length - MAX_CANDLES);
     await this.redis.set(key, JSON.stringify(candles), "EX", CANDLE_TTL_SECS);

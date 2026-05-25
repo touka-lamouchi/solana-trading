@@ -34,6 +34,13 @@ export interface DecisionResult {
     mempoolScore: number;
     newsScore: number;
   };
+  // ASI01 — Agent Goal Hijack defense: how much the independent sensors agree.
+  // Low agreement means one or more sensors may be poisoned/manipulated, so the
+  // aggregate score should be trusted less. signalAgreement in [0,1] (1 = all
+  // sensors point the same way). reliable=false when agreement is below floor.
+  signalAgreement: number;
+  reliable: boolean;
+  disagreementReason?: string;
 }
 
 export class DecisionModel {
@@ -142,6 +149,24 @@ export class DecisionModel {
       normMempool * mempoolScore +
       normNews    * newsScore;
 
+    // 4b. ASI01 — cross-validate the independent sensors. Each sub-score is in
+    //     [0,1] around a 0.5 neutral. Standard deviation across the *present*
+    //     sensors measures disagreement; a tightly clustered set is trustworthy,
+    //     a wide spread suggests one sensor may be manipulated (e.g. spoofed
+    //     mempool pressure or an injected sentiment spike). We only count sensors
+    //     that actually returned data (non-0.5-default) so a missing sensor
+    //     doesn't fake agreement.
+    const presentScores: number[] = [];
+    if (lstm) presentScores.push(chartScore);
+    if (sentiment) presentScores.push(socialScore);
+    if (whale && whale.netDirection !== "unknown") presentScores.push(whaleScore);
+    if (mempool) presentScores.push(mempoolScore);
+    if (news) presentScores.push(newsScore);
+
+    const { agreement, reason: disagreementReason } = this.computeAgreement(presentScores);
+    const AGREEMENT_FLOOR = 0.5; // below this, signals contradict too much to trust
+    const reliable = presentScores.length >= 2 ? agreement >= AGREEMENT_FLOOR : true;
+
     // 5. Determine overall direction
     let direction: "bullish" | "bearish" | "neutral" = "neutral";
     if (aiScore > 0.6) direction = "bullish";
@@ -167,6 +192,9 @@ export class DecisionModel {
         mempoolScore: parseFloat(mempoolScore.toFixed(4)),
         newsScore: parseFloat(newsScore.toFixed(4)),
       },
+      signalAgreement: parseFloat(agreement.toFixed(4)),
+      reliable,
+      ...(disagreementReason ? { disagreementReason } : {}),
     };
 
     logger.info({
@@ -184,9 +212,36 @@ export class DecisionModel {
       whale: whaleScore.toFixed(2),
       mempoolS: mempoolScore.toFixed(2),
       newsS: newsScore.toFixed(2),
+      agreement: result.signalAgreement,
+      reliable: result.reliable,
     }, "AI Decision");
 
+    if (!reliable) {
+      logger.warn(
+        { token: tokenMint.slice(0, 8) + "...", agreement: result.signalAgreement, reason: disagreementReason },
+        "AI signals disagree (ASI01) — decision marked unreliable; execution should gate on this"
+      );
+    }
+
     return result;
+  }
+
+  // Agreement = 1 - 2*stddev(scores), clamped to [0,1]. With scores in [0,1],
+  // max meaningful spread is ~0.5, so 2*stddev maps a fully-split set toward 0.
+  private computeAgreement(scores: number[]): { agreement: number; reason?: string } {
+    if (scores.length < 2) return { agreement: 1 };
+    const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
+    const variance = scores.reduce((a, b) => a + (b - mean) ** 2, 0) / scores.length;
+    const std = Math.sqrt(variance);
+    const agreement = Math.max(0, Math.min(1, 1 - 2 * std));
+    // Flag the specific split: are some sensors bullish (>0.6) while others bearish (<0.4)?
+    const bullish = scores.filter((s) => s > 0.6).length;
+    const bearish = scores.filter((s) => s < 0.4).length;
+    const reason =
+      bullish > 0 && bearish > 0
+        ? `${bullish} bullish vs ${bearish} bearish sensors`
+        : undefined;
+    return { agreement, ...(reason ? { reason } : {}) };
   }
 
   private directionToScore(lstm: LSTMSignalResult | null): number {

@@ -27,6 +27,16 @@ export interface AppConfig {
     hermes_url?: string;
     sol_usd_feed_id?: string;
   };
+  auth?: {
+    enabled: boolean;
+    admin_pubkeys?: string[];
+    cors_origins?: string[];
+    rate_limit?: {
+      window_ms: number;
+      max_requests: number;
+      auth_max_requests: number;
+    };
+  };
   redis: { host: string; port: number };
   ai_server: { host: string; port: number };
   capital: {

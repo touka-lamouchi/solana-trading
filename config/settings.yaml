@@ -32,6 +32,21 @@ vault:
   program_id: "Gw6USbf98yEjLLFa9aTeNpQjAvRjuZ2576AVvu3B1g6H"
   base_mint: "fUSDC"   # which token in devnet_tokens.json to track as the deposit currency
 
+# ── API security ─────────────────────────────────────────
+# auth.enabled: false  → DEVNET BYPASS. Every user maps to the bot wallet and
+#   ownership checks are skipped (keeps existing test scripts working).
+# auth.enabled: true   → PRODUCTION. Requires SIWS + JWT; ownership enforced.
+#   Also set the JWT_SECRET env var (>= 32 chars).
+auth:
+  enabled: false
+  admin_pubkeys: []               # base58 pubkeys granted role=admin
+  cors_origins:                   # allowed browser origins (used when enabled=true)
+    - "http://localhost:5173"
+  rate_limit:
+    window_ms: 60000              # 1 minute
+    max_requests: 120            # per IP per window (general)
+    auth_max_requests: 10        # per IP per window (auth + start/stop)
+
 # ── Services ─────────────────────────────────────────────
 redis:
   host: "localhost"

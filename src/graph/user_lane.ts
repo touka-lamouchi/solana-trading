@@ -34,6 +34,8 @@ export interface LaneMetrics {
   queue: QueueMetrics;
   processedTotal: number;
   errorTotal: number;
+  tripped: boolean;
+  trippedReason?: string;
 }
 
 export class UserLane {
@@ -49,6 +51,35 @@ export class UserLane {
 
   private processedTotal = 0;
   private errorTotal = 0;
+
+  // ASI10 — Rogue Agent kill switch + LLM06 circuit breaker.
+  // `tripped` halts all event dispatch for this lane while keeping the loop alive
+  // (so it can be reset without a full restart). The breaker trips automatically
+  // after CONSECUTIVE_ERROR_LIMIT back-to-back dispatch failures — a misbehaving
+  // or compromised lane stops acting instead of spinning on errors.
+  private tripped = false;
+  private trippedReason: string | undefined;
+  private consecutiveErrors = 0;
+  private static readonly CONSECUTIVE_ERROR_LIMIT = 5;
+
+  /** Manual kill switch — stop this lane from acting (e.g. operator/auto-pause). */
+  trip(reason: string): void {
+    this.tripped = true;
+    this.trippedReason = reason;
+    logger.warn({ userId: this.userId, reason }, "UserLane TRIPPED (ASI10 kill switch) — dispatch halted");
+  }
+
+  /** Clear the kill switch and resume dispatch. */
+  reset(): void {
+    this.tripped = false;
+    this.trippedReason = undefined;
+    this.consecutiveErrors = 0;
+    logger.info({ userId: this.userId }, "UserLane reset — dispatch resumed");
+  }
+
+  isTripped(): boolean {
+    return this.tripped;
+  }
 
   constructor(
     private readonly deps: EngineDeps,
@@ -97,6 +128,8 @@ export class UserLane {
       queue: this.queue.metrics(),
       processedTotal: this.processedTotal,
       errorTotal: this.errorTotal,
+      tripped: this.tripped,
+      ...(this.trippedReason ? { trippedReason: this.trippedReason } : {}),
     };
   }
 
@@ -123,8 +156,15 @@ export class UserLane {
   // ── Dispatcher ────────────────────────────────────────────────────────
 
   private async dispatch(event: LaneEvent): Promise<void> {
+    // ASI10 — when tripped, drain events without acting on them. The lane stays
+    // alive so an operator can reset() it, but no graph (and thus no trade) runs.
+    if (this.tripped) {
+      logger.debug({ userId: this.userId, kind: event.kind, reason: this.trippedReason }, "UserLane: event dropped (tripped)");
+      return;
+    }
     try {
       this.processedTotal++;
+      this.consecutiveErrors = 0; // reset optimistically; the catch re-counts on throw
       const latencyMs = Date.now() - event.enqueuedAt;
 
       if (event.kind === "signals_timer") {
@@ -184,7 +224,16 @@ export class UserLane {
       logger.debug({ kind: event.kind, userId: event.userId, latencyMs }, "UserLane: event unhandled (future phase)");
     } catch (e: any) {
       this.errorTotal++;
-      logger.error({ kind: event.kind, error: e.message }, "UserLane: dispatch error");
+      this.consecutiveErrors++;
+      logger.error(
+        { kind: event.kind, error: e.message, consecutive: this.consecutiveErrors },
+        "UserLane: dispatch error",
+      );
+      // LLM06 circuit breaker — too many back-to-back failures means something is
+      // systematically wrong; trip the lane rather than keep attempting to act.
+      if (this.consecutiveErrors >= UserLane.CONSECUTIVE_ERROR_LIMIT) {
+        this.trip(`circuit breaker: ${this.consecutiveErrors} consecutive dispatch errors`);
+      }
     }
   }
 }

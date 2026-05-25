@@ -1,5 +1,7 @@
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { Connection, Keypair } from "@solana/web3.js";
@@ -14,6 +16,11 @@ import { ModelServer } from "../models/model_server";
 import { loadWallet } from "../utils/wallet";
 import { getConfig } from "../utils/config";
 import { logger } from "../utils/logger";
+import { issueNonce, verifyAndIssueToken, isValidPubkey, verifyToken } from "./auth/siws";
+import { makeAuthenticate, makeRequireOwner } from "./middleware/auth";
+import { validateBody } from "./middleware/validate";
+import { ConfigUpdateSchema, TestSlowOppSchema } from "./schemas";
+import { auditLog } from "./audit";
 
 const PORT = parseInt(process.env["API_PORT"] ?? "3001");
 
@@ -149,9 +156,80 @@ async function boot() {
 
   // ── Express app ─────────────────────────────────────────
 
+  const authCfg = config.auth ?? { enabled: false };
+  const authEnabled = authCfg.enabled === true;
+  const adminPubkeys = authCfg.admin_pubkeys ?? [];
+  const authOpts = { enabled: authEnabled };
+  const authenticate = makeAuthenticate(authOpts);
+  const requireOwner = makeRequireOwner(authOpts);
+
+  if (!authEnabled) {
+    logger.warn(
+      "auth.enabled is FALSE — running in DEVNET BYPASS mode. " +
+        "No authentication or ownership checks. Do NOT use in production."
+    );
+  }
+
   const app = express();
-  app.use(cors());
-  app.use(express.json());
+  app.set("trust proxy", 1); // behind a reverse proxy / TLS terminator in prod
+
+  // A05 — security headers
+  app.use(helmet());
+
+  // A05 — CORS: open in devnet bypass, locked to an allowlist when auth is on.
+  if (authEnabled) {
+    const origins = authCfg.cors_origins ?? [];
+    app.use(cors({ origin: origins, credentials: true }));
+  } else {
+    app.use(cors());
+  }
+
+  app.use(express.json({ limit: "64kb" })); // bound payload size
+
+  // A05 — rate limiting
+  const rl = authCfg.rate_limit ?? { window_ms: 60000, max_requests: 120, auth_max_requests: 10 };
+  const generalLimiter = rateLimit({
+    windowMs: rl.window_ms,
+    max: rl.max_requests,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+  const strictLimiter = rateLimit({
+    windowMs: rl.window_ms,
+    max: rl.auth_max_requests,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+  app.use(generalLimiter);
+
+  // ── Auth routes (SIWS + JWT) ────────────────────────────
+  // GET /auth/nonce?pubkey=<base58> → message to sign
+  app.get("/auth/nonce", strictLimiter, async (req, res) => {
+    const pubkey = (req.query["pubkey"] as string) ?? "";
+    if (!isValidPubkey(pubkey)) {
+      res.status(400).json({ error: "Invalid pubkey" });
+      return;
+    }
+    const { message } = await issueNonce(cache, pubkey);
+    res.json({ message });
+  });
+
+  // POST /auth/verify { pubkey, signature } → { token }
+  app.post("/auth/verify", strictLimiter, async (req, res) => {
+    const { pubkey, signature } = req.body ?? {};
+    if (!isValidPubkey(pubkey) || typeof signature !== "string") {
+      res.status(400).json({ error: "pubkey and signature required" });
+      return;
+    }
+    const token = await verifyAndIssueToken(cache, pubkey, signature, adminPubkeys);
+    if (!token) {
+      auditLog("auth_failed", { pubkey });
+      res.status(401).json({ error: "Signature verification failed" });
+      return;
+    }
+    auditLog("auth_success", { pubkey });
+    res.json({ token });
+  });
 
   // Health
   app.get("/health", (_req, res) => {
@@ -226,8 +304,8 @@ async function boot() {
   });
 
   // Start bot for a user
-  app.post("/users/:userId/start", async (req, res) => {
-    const { userId } = req.params;
+  app.post("/users/:userId/start", strictLimiter, authenticate, requireOwner, async (req, res) => {
+    const userId = String(req.params["userId"]);
 
     try {
       if (registry.isRunning(userId)) {
@@ -240,6 +318,7 @@ async function boot() {
       const walletKeypair = botWallet;
 
       await registry.startUser(userId, walletKeypair);
+      auditLog("bot_started", { userId, by: req.auth?.sub });
       res.json({ status: "started", userId });
     } catch (e: any) {
       logger.error({ userId, error: e.message }, "Failed to start user");
@@ -248,11 +327,12 @@ async function boot() {
   });
 
   // Stop bot for a user
-  app.post("/users/:userId/stop", async (req, res) => {
-    const { userId } = req.params;
+  app.post("/users/:userId/stop", strictLimiter, authenticate, requireOwner, async (req, res) => {
+    const userId = String(req.params["userId"]);
 
     try {
       await registry.stopUser(userId);
+      auditLog("bot_stopped", { userId, by: req.auth?.sub });
       res.json({ status: "stopped", userId });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
@@ -260,8 +340,8 @@ async function boot() {
   });
 
   // Get user status
-  app.get("/users/:userId/status", (req, res) => {
-    const { userId } = req.params;
+  app.get("/users/:userId/status", authenticate, requireOwner, (req, res) => {
+    const userId = String(req.params["userId"]);
     const status = registry.getStatus(userId);
 
     if (!status) {
@@ -273,43 +353,53 @@ async function boot() {
   });
 
   // Get trade history
-  app.get("/users/:userId/trades", async (req, res) => {
-    const { userId } = req.params;
+  app.get("/users/:userId/trades", authenticate, requireOwner, async (req, res) => {
+    const userId = String(req.params["userId"]);
     const date = req.query.date as string | undefined;
     const trades = await registry.getTrades(userId, date);
     res.json(trades);
   });
 
   // Get/update user config
-  app.get("/users/:userId/config", async (req, res) => {
-    const { userId } = req.params;
+  app.get("/users/:userId/config", authenticate, requireOwner, async (req, res) => {
+    const userId = String(req.params["userId"]);
     const config = await registry.getConfig(userId);
     res.json(config);
   });
 
-  app.post("/users/:userId/config", async (req, res) => {
-    const { userId } = req.params;
-    const updated = await registry.updateConfig(userId, req.body);
-    res.json(updated);
-  });
+  app.post(
+    "/users/:userId/config",
+    authenticate,
+    requireOwner,
+    validateBody(ConfigUpdateSchema),
+    async (req, res) => {
+      const userId = String(req.params["userId"]);
+      const updated = await registry.updateConfig(userId, req.body);
+      auditLog("config_changed", { userId, by: req.auth?.sub, fields: Object.keys(req.body) });
+      res.json(updated);
+    }
+  );
 
   // Test the slow-path safety + protection chain against an arbitrary mint.
   // Body: { mint: string, amountIn?: number }
   // Emits a safety_rejected / guard_rejected / trade_rejected WS event so the
   // frontend activity log shows exactly which Sx blocked the trade.
-  app.post("/users/:userId/test-slow-opportunity", async (req, res) => {
-    const { userId } = req.params;
+  app.post(
+    "/users/:userId/test-slow-opportunity",
+    strictLimiter,
+    authenticate,
+    requireOwner,
+    validateBody(TestSlowOppSchema),
+    async (req, res) => {
+    const userId = String(req.params["userId"]);
     const { mint, amountIn } = req.body ?? {};
-    if (!mint || typeof mint !== "string") {
-      res.status(400).json({ error: "mint is required" });
-      return;
-    }
     try {
       const detail = await registry.testSlowOpportunity(userId, mint, { amountIn });
       if (!detail) {
         res.status(404).json({ error: "user not running" });
         return;
       }
+      auditLog("test_opportunity", { userId, by: req.auth?.sub, mint });
       res.json({ stage: detail.stage, reason: detail.reason, reasonCode: detail.reasonCode });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -352,6 +442,16 @@ async function boot() {
 
         // Subscribe to a user's tick feed
         if (msg.type === "subscribe" && msg.userId) {
+          // Auth: when enabled, the subscriber must present a JWT whose subject
+          // matches the userId they want to stream (WS equivalent of requireOwner).
+          if (authEnabled) {
+            const payload = msg.token ? verifyToken(msg.token) : null;
+            if (!payload || (payload.role !== "admin" && payload.sub !== msg.userId)) {
+              ws.send(JSON.stringify({ type: "error", message: "Unauthorized" }));
+              return;
+            }
+          }
+
           // Unsubscribe from previous
           if (subscribedUserId && tickListener) {
             registry.removeTickListener(subscribedUserId, tickListener);

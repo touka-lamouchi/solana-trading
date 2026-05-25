@@ -14,6 +14,17 @@ export function makeCheckAiThreshold(_deps: EngineDeps) {
     const threshold = state.userConfig.aiConfidenceThreshold ?? 0.5;
     const score = state.lastDecision?.aiScore;
 
+    // ASI01 / LLM06 — do not let an unreliable AI decision drive an autonomous
+    // trade. If the independent sensors contradict each other (one may be
+    // poisoned/manipulated), block the slow path regardless of the raw score.
+    if (state.lastDecision && state.lastDecision.reliable === false) {
+      logger.warn(
+        { agreement: state.lastDecision.signalAgreement, reason: state.lastDecision.disagreementReason },
+        "  → AI threshold: BLOCKED (signals disagree — unreliable, ASI01)",
+      );
+      return { executionBlocked: true };
+    }
+
     if (score === undefined || score < threshold) {
       logger.debug(
         { score: score?.toFixed(2) ?? "none", threshold },
