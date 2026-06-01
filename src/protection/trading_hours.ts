@@ -2,21 +2,21 @@ import { logger } from "../utils/logger";
 
 export interface TradingHoursConfig {
   enabled: boolean;
-  startHour: number;  // 0-23 UTC
-  endHour: number;    // 0-23 UTC
+  startMinutes: number;  // 0-1439 local time
+  endMinutes: number;    // 0-1439 local time
 }
 
 export class TradingHours {
   private enabled: boolean;
-  private startHour: number;
-  private endHour: number;
+  private startMinutes: number;
+  private endMinutes: number;
 
   constructor(config: TradingHoursConfig) {
     this.enabled = config.enabled;
-    this.startHour = config.startHour;
-    this.endHour = config.endHour;
+    this.startMinutes = config.startMinutes;
+    this.endMinutes = config.endMinutes;
     if (this.enabled) {
-      logger.info({ start: this.startHour, end: this.endHour }, "Trading hours enabled");
+      logger.info({ start: this.startMinutes, end: this.endMinutes }, "Trading hours enabled");
     } else {
       logger.info("Trading hours: 24/7 mode");
     }
@@ -25,20 +25,20 @@ export class TradingHours {
   canTrade(): boolean {
     if (!this.enabled) return true;
 
-    const hour = new Date().getUTCHours();
+    const now = new Date();
+    const current = now.getHours() * 60 + now.getMinutes();
 
-    if (this.startHour < this.endHour) {
-      // Normal range: e.g. 8-22
-      const allowed = hour >= this.startHour && hour < this.endHour;
+    if (this.startMinutes < this.endMinutes) {
+      const allowed = current >= this.startMinutes && current < this.endMinutes;
       if (!allowed) {
-        logger.warn({ currentHour: hour, allowed: `${this.startHour}-${this.endHour}` }, "Outside trading hours");
+        logger.warn({ current, allowed: `${this.startMinutes}-${this.endMinutes}` }, "Outside trading hours");
       }
       return allowed;
     } else {
-      // Overnight range: e.g. 22-8
-      const allowed = hour >= this.startHour || hour < this.endHour;
+      // Overnight range e.g. 22:00-08:00
+      const allowed = current >= this.startMinutes || current < this.endMinutes;
       if (!allowed) {
-        logger.warn({ currentHour: hour, allowed: `${this.startHour}-${this.endHour}` }, "Outside trading hours");
+        logger.warn({ current, allowed: `${this.startMinutes}-${this.endMinutes}` }, "Outside trading hours");
       }
       return allowed;
     }
@@ -46,8 +46,8 @@ export class TradingHours {
 
   update(config: Partial<TradingHoursConfig>): void {
     if (config.enabled !== undefined) this.enabled = config.enabled;
-    if (config.startHour !== undefined) this.startHour = config.startHour;
-    if (config.endHour !== undefined) this.endHour = config.endHour;
-    logger.info({ enabled: this.enabled, start: this.startHour, end: this.endHour }, "Trading hours updated");
+    if (config.startMinutes !== undefined) this.startMinutes = config.startMinutes;
+    if (config.endMinutes !== undefined) this.endMinutes = config.endMinutes;
+    logger.info({ enabled: this.enabled, start: this.startMinutes, end: this.endMinutes }, "Trading hours updated");
   }
 }

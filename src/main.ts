@@ -87,8 +87,8 @@ async function boot() {
     slippage: { maxSlippageBps: config.protection.slippage_max_bps },
     tradingHours: {
       enabled: config.trading_hours.enabled,
-      startHour: parseInt(config.trading_hours.start_utc?.split(":")[0] ?? "0"),
-      endHour: parseInt(config.trading_hours.end_utc?.split(":")[0] ?? "23"),
+      startMinutes: +(config.trading_hours.start_utc?.split(":")[0] ?? 0) * 60 + +(config.trading_hours.start_utc?.split(":")[1] ?? 0),
+      endMinutes:   +(config.trading_hours.end_utc?.split(":")[0]   ?? 0) * 60 + +(config.trading_hours.end_utc?.split(":")[1]   ?? 0),
     },
   });
 

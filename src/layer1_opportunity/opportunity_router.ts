@@ -5,7 +5,7 @@ import { logger } from "../utils/logger";
 
 export type Opportunity = ArbOpportunity | LiquidationOpportunity | YieldOpportunity;
 
-export type PathType = "fast" | "slow" | "liq";
+export type PathType = "fast" | "slow";
 
 export interface RoutedOpportunity {
   opportunity: Opportunity;
@@ -24,8 +24,11 @@ export class OpportunityRouter {
         reason = "Arbitrage — atomic flash loan, no capital risk";
         break;
       case "liquidation":
-        path = "liq";
-        reason = "Liquidation — calls programs-lending liquidate instruction";
+        // Liquidation is a sub-branch of the fast path: it shares the
+        // deterministic fast tail (no AI gate) and is dispatched to the
+        // lending executor by opportunity type inside the fast tail.
+        path = "fast";
+        reason = "Liquidation — fast path, dispatched to programs-lending liquidate";
         break;
       case "yield":
         path = "slow";

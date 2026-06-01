@@ -6,7 +6,7 @@ async function testProtection() {
     autoPause: { maxConsecutiveFailures: 3 },
     drawdown: { dailyLimit: 1000, autoPausePercent: 90 },
     slippage: { maxSlippageBps: 500 },
-    tradingHours: { enabled: false, startHour: 8, endHour: 22 },
+    tradingHours: { enabled: false, startMinutes: 480, endMinutes: 1320 },
   });
 
   // ============================================================
@@ -79,7 +79,7 @@ async function testProtection() {
   // TEST 5: TRADING HOURS
   // ============================================================
   logger.info("=== Test 5: Trading Hours ===");
-  protection.tradingHours.update({ enabled: true, startHour: 0, endHour: 1 });
+  protection.tradingHours.update({ enabled: true, startMinutes: 0, endMinutes: 60 });
   const currentHour = new Date().getHours();
 
   const check9 = protection.canExecuteTrade(0);
@@ -89,7 +89,7 @@ async function testProtection() {
     window: "0-1",
   }, "Trading hours test (probably blocked unless midnight)");
 
-  protection.tradingHours.update({ enabled: true, startHour: 0, endHour: 23 });
+  protection.tradingHours.update({ enabled: true, startMinutes: 0, endMinutes: 0 });
   const check10 = protection.canExecuteTrade(0);
   logger.info({ result: check10 }, "Trading hours 0-23 (should pass)");
 

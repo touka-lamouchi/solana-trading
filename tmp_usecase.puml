@@ -1,0 +1,53 @@
+@startuml
+left to right direction
+skinparam packageStyle rectangle
+skinparam actorStyle none
+skinparam usecase {
+    BackgroundColor AliceBlue
+    BorderColor SteelBlue
+    FontSize 12
+}
+skinparam rectangle {
+    BackgroundColor White
+    BorderColor Black
+    BorderThickness 2
+}
+
+:Visitor: as Visitor
+:Trader: as Trader
+Visitor <|-- Trader
+
+rectangle "Solana Trading Platform" {
+    usecase "View Market\nSnapshot" as UC01
+    usecase "Manage Wallet\n& Vault" as UC02
+    usecase "Configure Trading\nStrategy" as UC03
+    usecase "Start / Stop\nEngine" as UC04
+    usecase "Monitor Live\nActivity" as UC05
+    usecase "Execute On-Chain\nTransaction" as UC06
+    usecase "Stream Account\nUpdates" as UC07
+    usecase "Provide Market\nCandle Data" as UC08
+    usecase "Provide\nPrice Feeds" as UC09
+    usecase "Provide AI\nSentiment Signal" as UC10
+}
+
+rectangle "Solana Network" as Solana
+rectangle "Binance WebSocket" as Binance
+rectangle "Pyth Network" as Pyth
+rectangle "Gemini / News APIs" as Gemini
+
+Visitor -- UC01
+Trader -- UC02
+Trader -- UC03
+Trader -- UC04
+Trader -- UC05
+
+UC06 -- Solana
+UC07 -- Solana
+UC08 -- Binance
+UC09 -- Pyth
+UC10 -- Gemini
+
+UC04 ..> UC03 : <<include>>
+UC05 ..> UC04 : <<include>>
+UC02 ..> UC06 : <<include>>
+@enduml

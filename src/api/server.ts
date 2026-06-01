@@ -86,7 +86,7 @@ async function boot() {
     autoPause: { maxConsecutiveFailures: 999 },
     drawdown: { dailyLimit: 0, autoPausePercent: 100 },
     slippage: { maxSlippageBps: config.protection.slippage_max_bps },
-    tradingHours: { enabled: false, startHour: 0, endHour: 23 },
+    tradingHours: { enabled: false, startMinutes: 0, endMinutes: 0 },
   });
 
   const viewerEngine = new TradingEngine({

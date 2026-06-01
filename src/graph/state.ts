@@ -91,7 +91,9 @@ export const GraphState = Annotation.Root({
     reducer: (_, next) => next,
     default: () => null,
   }),
-  routedPath: Annotation<"fast" | "slow" | "liq" | null>({
+  // Top-level routed path. Liquidation is NOT a top-level path: it is a
+  // sub-branch of "fast" dispatched by opportunity type in the fast tail.
+  routedPath: Annotation<"fast" | "slow" | null>({
     reducer: (_, next) => next,
     default: () => null,
   }),

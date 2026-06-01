@@ -33,18 +33,26 @@ signals_timer → full discovery subgraph:
                                    detect_whale_copy, detect_mempool_pressure,
                                    build_directional]
   → filter_by_config → pick_next (loop) → route → fast or slow path → build_summary
+  (route is two-way: fast | slow. Liquidation rides the fast tail, dispatched
+   to execute_liq by opp type after check_vault — see "Fast path" below.)
 
 arb_opportunity / liq_opportunity → fast execution tail only:
   pre-populates filteredOpportunities → pick_next → route → fast path
+  (liq dispatched to execute_liq inside the fast tail by opp type)
 
 candle_closed → AI refresh + signal detectors:
   same as signals_timer (short-circuits discovery if poolStates absent)
 ```
 
-### Fast path (arb / liquidation)
+### Fast path (arb + liquidation)
+Routing is **two-way** (`route` returns `"fast" | "slow"`). Liquidation is NOT a
+top-level path — it is a sub-branch of fast, dispatched by `opp.arb.type` *after*
+the shared protection + vault checks (`afterVault` conditional edge in build.ts):
 ```
-log_whale_signals → check_guard_fast → check_vault → execute_fast → pick_next
+log_whale_signals → check_guard_fast → check_vault → ┬─ (type==="liquidation") → execute_liq  → pick_next
+                                                     └─ (else / arbitrage)      → execute_fast → pick_next
 ```
+`log_whale_signals` is informational telemetry only — it gates nothing.
 
 ### Slow path (yield, directional, chart_pattern, social_buzz, copy_whale, mempool_pressure)
 ```
@@ -155,7 +163,9 @@ src/
         filter_by_config.ts    # Applies user config toggles
       execution/
         pick_next.ts           # Pops first from remainingOpportunities
-        route.ts               # fast vs slow via OpportunityRouter
+        route.ts               # fast vs slow via OpportunityRouter (two-way only;
+                               # liquidation routes to "fast" and is dispatched to
+                               # execute_liq by opp type after check_vault)
         log_whale_signals.ts   # Logs whale + mempool context before execution
         check_guard_fast.ts    # ProtectionManager.canExecuteTrade (fast path)
         check_vault.ts         # VaultReader balance gate
