@@ -1,8 +1,12 @@
 import { ModelServer, RegimeResult, DirectionResult } from "../../models/model_server";
-import { LSTMCache, LSTMPrediction } from "../../cache/lstm_cache";
+import { RegimeCache, RegimePrediction } from "../../cache/regime_cache";
 import { logger } from "../../utils/logger";
 
-export interface LSTMSignalResult {
+// RegimeSignal — queries the Python AI server's regime classifier (an sklearn
+// model served at /predict/regime) plus the direction endpoint, and returns a
+// combined regime + direction reading. (Formerly named LSTMSignal; the backing
+// model is not an LSTM.)
+export interface RegimeSignalResult {
   token: string;
   regime: string;          // trending | ranging | crash
   direction: string;       // up | down | neutral
@@ -11,11 +15,11 @@ export interface LSTMSignalResult {
   mock: boolean;
 }
 
-export class LSTMSignal {
+export class RegimeSignal {
   private modelServer: ModelServer;
-  private cache: LSTMCache;
+  private cache: RegimeCache;
 
-  constructor(modelServer: ModelServer, cache: LSTMCache) {
+  constructor(modelServer: ModelServer, cache: RegimeCache) {
     this.modelServer = modelServer;
     this.cache = cache;
   }
@@ -25,7 +29,7 @@ export class LSTMSignal {
     timeframe: string = "15m",
     regimeFeatures?: number[],
     gruFeatures?: number[],
-  ): Promise<LSTMSignalResult> {
+  ): Promise<RegimeSignalResult> {
     // 1. Check cache first (2min TTL)
     const cached = await this.cache.get(tokenMint, timeframe);
     if (cached) {
@@ -52,7 +56,7 @@ export class LSTMSignal {
     const mock = (regimeResult?.mock !== false) || (directionResult?.mock !== false);
 
     // 3. Write to cache
-    const prediction: LSTMPrediction = {
+    const prediction: RegimePrediction = {
       token: tokenMint,
       predictedDirection: direction as "up" | "down" | "neutral",
       predictedChange,
@@ -68,7 +72,7 @@ export class LSTMSignal {
       direction,
       confidence: confidence.toFixed(3),
       mock,
-    }, "LSTM signal");
+    }, "Regime signal");
 
     return { token: tokenMint, regime, direction, confidence, predictedChange, mock };
   }

@@ -35,10 +35,10 @@ import { RoutePlanner } from "../layer2_execution/route_planner";
 import { VolatilityPredictor } from "../layer2_execution/volatility_predictor";
 import { CacheManager } from "../cache/cache_manager";
 import { WhaleCache } from "../cache/whale_cache";
-import { LSTMCache } from "../cache/lstm_cache";
+import { RegimeCache } from "../cache/regime_cache";
 import { SentimentCache } from "../cache/sentiment_cache";
 import { WhaleSignal } from "../layer1_opportunity/ai_signals/whale_signal";
-import { LSTMSignal } from "../layer1_opportunity/ai_signals/lstm_signal";
+import { RegimeSignal } from "../layer1_opportunity/ai_signals/regime_signal";
 import { SentimentSignal } from "../layer1_opportunity/ai_signals/sentiment_signal";
 import { DecisionModel, DecisionResult, AIWeights } from "../layer1_opportunity/decision_model";
 import { ModelServer } from "../models/model_server";
@@ -266,9 +266,9 @@ export class TradingEngine {
       cfg.ai_server?.host ?? "localhost",
       cfg.ai_server?.port ?? 8000,
     );
-    const lstmCache = new LSTMCache(opts.cache);
+    const regimeCache = new RegimeCache(opts.cache);
     const sentimentCache = new SentimentCache(opts.cache);
-    const lstmSignal = new LSTMSignal(this.modelServer, lstmCache);
+    const regimeSignal = new RegimeSignal(this.modelServer, regimeCache);
     this.sentimentSignal = new SentimentSignal(this.modelServer, sentimentCache);
     const volatilityPredictor = new VolatilityPredictor(this.modelServer);
 
@@ -327,7 +327,7 @@ export class TradingEngine {
     }
 
     this.decisionModel = new DecisionModel(
-      lstmSignal,
+      regimeSignal,
       this.sentimentSignal,
       this.whaleSignal,
       volatilityPredictor,

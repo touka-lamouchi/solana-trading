@@ -1,7 +1,7 @@
 import { CacheManager } from "../../src/cache/cache_manager";
 import { SentimentCache } from "../../src/cache/sentiment_cache";
 import { WhaleCache } from "../../src/cache/whale_cache";
-import { LSTMCache } from "../../src/cache/lstm_cache";
+import { RegimeCache } from "../../src/cache/regime_cache";
 import { TokenScoreCache } from "../../src/cache/token_score_cache";
 import { logger } from "../../src/utils/logger";
 import fs from "fs";
@@ -10,7 +10,7 @@ async function testLatency() {
   const cache = new CacheManager();
   const sentiment = new SentimentCache(cache);
   const whale = new WhaleCache(cache);
-  const lstm = new LSTMCache(cache);
+  const regime = new RegimeCache(cache);
   const tokenScore = new TokenScoreCache(cache);
 
   const tokens = JSON.parse(fs.readFileSync("config/devnet_tokens.json", "utf-8"));
@@ -35,13 +35,13 @@ async function testLatency() {
   elapsed = performance.now() - start;
   logger.info({ avgMs: (elapsed / iterations).toFixed(3) }, "Whale cache avg read");
 
-  // LSTM read
+  // Regime read
   start = performance.now();
   for (let i = 0; i < iterations; i++) {
-    await lstm.get(tokens.tokenB.mint, "5m");
+    await regime.get(tokens.tokenB.mint, "5m");
   }
   elapsed = performance.now() - start;
-  logger.info({ avgMs: (elapsed / iterations).toFixed(3) }, "LSTM cache avg read");
+  logger.info({ avgMs: (elapsed / iterations).toFixed(3) }, "Regime cache avg read");
 
   // Token score read
   start = performance.now();
