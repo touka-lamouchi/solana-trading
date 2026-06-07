@@ -17,7 +17,7 @@
  */
 
 import { detectArb } from "./arb_scenario";
-import { fetchBinanceCandles, syntheticCandles, type BTCandle } from "./binance_data";
+import { fetchBinanceCandles, syntheticCandles, BACKTEST_END_TIME, type BTCandle } from "./binance_data";
 
 const CANDIDATE_MULTS = [1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
 const FEE_BASE = 5;
@@ -26,8 +26,8 @@ const TEST = 75;   // candles to evaluate on (out-of-sample)
 
 async function loadCandles(): Promise<{ candles: BTCandle[]; source: string }> {
   try {
-    const candles = await fetchBinanceCandles("SOLUSDT", "1h", 1000);
-    if (candles.length > TRAIN + TEST + 1) return { candles, source: "Binance SOLUSDT 1h (real)" };
+    const candles = await fetchBinanceCandles("SOLUSDT", "1h", 1000, BACKTEST_END_TIME);
+    if (candles.length > TRAIN + TEST + 1) return { candles, source: "Binance SOLUSDT 1h (real, fixed window)" };
   } catch (e: any) {
     console.log(`  [!] Binance fetch failed (${e.message}); using synthetic fallback.`);
   }

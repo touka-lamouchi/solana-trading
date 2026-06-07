@@ -24,7 +24,7 @@
 
 import { findRankedCycles, cycleLabel, type RankedCycle } from "../../src/layer1_opportunity/pure_code/arb_graph_builder";
 import type { PoolRecord } from "../../src/layer1_opportunity/pure_code/pool_registry";
-import { fetchBinanceCandles, syntheticCandles, type BTCandle } from "./binance_data";
+import { fetchBinanceCandles, syntheticCandles, BACKTEST_END_TIME, type BTCandle } from "./binance_data";
 import { Backtest, printResult } from "./harness";
 
 // Fictional mints — only identity matters to the pure graph code.
@@ -80,7 +80,7 @@ interface ArbDecision {
 
 async function loadCandles(): Promise<{ candles: BTCandle[]; source: string }> {
   try {
-    const candles = await fetchBinanceCandles("SOLUSDT", "1h", 200);
+    const candles = await fetchBinanceCandles("SOLUSDT", "1h", 200, BACKTEST_END_TIME);
     if (candles.length > 10) return { candles, source: "Binance SOLUSDT 1h (real)" };
   } catch (e: any) {
     console.log(`  [!] Binance fetch failed (${e.message}); using synthetic fallback.`);

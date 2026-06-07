@@ -29,15 +29,15 @@
  */
 
 import { computeSignalAgreement, AGREEMENT_FLOOR } from "../../src/layer1_opportunity/decision_model";
-import { fetchBinanceCandles, syntheticCandles, type BTCandle } from "./binance_data";
+import { fetchBinanceCandles, syntheticCandles, BACKTEST_END_TIME, type BTCandle } from "./binance_data";
 
 const POISON_EVERY = 7;       // poison one sensor on every Nth candle
 const TRADE_THRESHOLD = 0.6;  // |aiScore-0.5| band that triggers a directional trade
 
 async function loadCandles(): Promise<{ candles: BTCandle[]; source: string }> {
   try {
-    const candles = await fetchBinanceCandles("SOLUSDT", "1h", 500);
-    if (candles.length > 10) return { candles, source: "Binance SOLUSDT 1h (real)" };
+    const candles = await fetchBinanceCandles("SOLUSDT", "1h", 500, BACKTEST_END_TIME);
+    if (candles.length > 10) return { candles, source: "Binance SOLUSDT 1h (real, fixed window)" };
   } catch (e: any) {
     console.log(`  [!] Binance fetch failed (${e.message}); using synthetic fallback.`);
   }
