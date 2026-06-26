@@ -22,6 +22,10 @@ ai/*.pt
 ai/*.h5
 ai/*.onnx
 ai/*.joblib
+# ...except the trained models the bot needs to run (small, must travel with the repo)
+!ai/regime_detector_v3.pkl
+!ai/gru_vol_expansion_v2.keras
+!ai/gru_vol_expansion_v2_meta.pkl
 
 # Wallet / secrets — NEVER commit these
 config/dev-wallet.json
