@@ -122,9 +122,13 @@ export class ProtectionManager {
   }
 
   updateTradingHours(startTime: string, endTime: string): void {
-    const startHour = parseInt(startTime.split(":")[0] ?? "0");
-    const endHour = parseInt(endTime.split(":")[0] ?? "23");
-    const enabled = startTime !== "00:00" || endTime !== "23:59";
-    this.tradingHours.update({ enabled, startHour, endHour });
+    const toMinutes = (t: string) => {
+      const [h, m] = t.split(":").map(Number);
+      return (h ?? 0) * 60 + (m ?? 0);
+    };
+    const startMinutes = toMinutes(startTime);
+    const endMinutes = toMinutes(endTime);
+    const enabled = startMinutes !== endMinutes;
+    this.tradingHours.update({ enabled, startMinutes, endMinutes });
   }
 }

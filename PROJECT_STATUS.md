@@ -72,12 +72,16 @@
    │   candle: AI refresh + detector subgraph           │
    │                                                    │
    │   Execution loop (FIFO per opportunity):           │
-   │   pick_next → route                                │
+   │   pick_next → route  (two-way: fast | slow)        │
    │   fast: log_whale → check_guard → check_vault      │
-   │          → execute_fast → pick_next                │
+   │         → [type==liquidation] → execute_liq        │
+   │         → [else / arbitrage]  → execute_fast       │
+   │         → pick_next                                │
    │   slow: check_ai_threshold → check_safety         │
    │         → log_whale → check_guard                  │
    │         → execute_slow → pick_next                 │
+   │   (liquidation is a sub-branch of fast, not a      │
+   │    top-level path; dispatched by opp type)         │
    │   → build_summary → emit_status → END              │
    └────────────────────────────────────────────────────┘
                │
@@ -173,6 +177,7 @@ Tests added:
 All three sub-phases shipped:
 - **6a**: `programs-lending/` Anchor program — `LoanPosition` PDA account, `register_position` + `liquidate` instructions with on-chain health check (cross-multiply to avoid integer overflow)
 - **6b**: `src/layer2_execution/lending_client.ts` — IDL wrapper; `execute_liq.ts` graph node; `TradingEngine.executeLiquidationPublic()` private path; `route.ts` / `build.ts` updated for `"liq"` path; `LiquidationHunter` upgraded to `loadFromChain()`; `user_registry.ts` lazy-inits `LendingClient` and injects into `EngineDeps`
+  - **Later refinement:** the top-level `"liq"` routed path was folded into `"fast"`. Routing is now two-way (`"fast" | "slow"`); liquidation is a sub-branch of the fast tail, dispatched to `execute_liq` by `opp.arb.type` via the `afterVault` conditional edge after `check_vault`. `routedPath` is now `"fast" | "slow" | null`.
 - **6c**: `LiquidationReactor` now uses `accountSubscribe` on each position PDA (immediate notification); falls back to Redis poll when `lendingClient` is absent
 
 Deploy sequence:

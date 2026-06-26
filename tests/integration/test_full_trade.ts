@@ -43,7 +43,7 @@ async function testFullTrade() {
       autoPausePercent: cfg.protection.drawdown_pause_pct,
     },
     slippage: { maxSlippageBps: cfg.protection.slippage_max_bps },
-    tradingHours: { enabled: cfg.trading_hours.enabled, startHour: 0, endHour: 23 },
+    tradingHours: { enabled: cfg.trading_hours.enabled, startMinutes: 0, endMinutes: 0 },
   });
 
   const txBuilder = new TransactionBuilder(connection, ammProgram, protection.slippage, tokens, wallet);

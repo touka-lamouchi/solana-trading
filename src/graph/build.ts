@@ -89,10 +89,17 @@ function afterPickNext(state: GraphStateType): "route" | "build_summary" {
   return state.currentOpp ? "route" : "build_summary";
 }
 
-function afterRoute(state: GraphStateType): "log_whale_signals_fast" | "execute_liq" | "check_ai_threshold" {
-  if (state.routedPath === "fast") return "log_whale_signals_fast";
-  if (state.routedPath === "liq") return "execute_liq";
-  return "check_ai_threshold";
+// Top-level routing: fast vs slow only. Liquidation is a sub-branch of fast,
+// resolved later by afterVault on opportunity type.
+function afterRoute(state: GraphStateType): "log_whale_signals_fast" | "check_ai_threshold" {
+  return state.routedPath === "fast" ? "log_whale_signals_fast" : "check_ai_threshold";
+}
+
+// Fast-tail dispatch: after the shared protection + vault checks, send
+// liquidations to the lending executor and everything else (arbitrage) to the
+// generic cycle / triangular executor.
+function afterVault(state: GraphStateType): "execute_liq" | "execute_fast" {
+  return state.currentOpp?.arb.type === "liquidation" ? "execute_liq" : "execute_fast";
 }
 
 // ── Graph builder ───────────────────────────────────────
@@ -183,14 +190,17 @@ export function buildGraph(deps: EngineDeps) {
 
   g.addConditionalEdges("route", afterRoute, {
     log_whale_signals_fast: "log_whale_signals_fast",
-    execute_liq: "execute_liq",
     check_ai_threshold: "check_ai_threshold",
   });
 
-  // Fast path tail
+  // Fast path tail (shared by arbitrage and liquidation):
+  //   log whale signals → protection check → vault check → dispatch by type
   g.addEdge("log_whale_signals_fast", "check_guard_fast");
   g.addEdge("check_guard_fast", "check_vault");
-  g.addEdge("check_vault", "execute_fast");
+  g.addConditionalEdges("check_vault", afterVault, {
+    execute_fast: "execute_fast",
+    execute_liq: "execute_liq",
+  });
   g.addEdge("execute_fast", "pick_next");
 
   // Slow path tail

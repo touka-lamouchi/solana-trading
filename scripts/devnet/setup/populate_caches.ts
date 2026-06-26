@@ -1,7 +1,7 @@
 import { CacheManager } from "../../../src/cache/cache_manager";
 import { SentimentCache } from "../../../src/cache/sentiment_cache";
 import { WhaleCache } from "../../../src/cache/whale_cache";
-import { LSTMCache } from "../../../src/cache/lstm_cache";
+import { RegimeCache } from "../../../src/cache/regime_cache";
 import { TokenScoreCache } from "../../../src/cache/token_score_cache";
 import { EMATracker } from "../../../src/cache/ema_tracker";
 import { logger } from "../../../src/utils/logger";
@@ -11,7 +11,7 @@ async function populateCaches() {
   const cache = new CacheManager();
   const sentiment = new SentimentCache(cache);
   const whale = new WhaleCache(cache);
-  const lstm = new LSTMCache(cache);
+  const regime = new RegimeCache(cache);
   const tokenScore = new TokenScoreCache(cache);
   const ema = new EMATracker(cache);
 
@@ -70,8 +70,8 @@ async function populateCaches() {
   });
   logger.info("Whale cache populated");
 
-  // LSTM predictions
-  await lstm.set(tokens.tokenB.mint, "5m", {
+  // Regime/direction predictions
+  await regime.set(tokens.tokenB.mint, "5m", {
     token: tokens.tokenB.mint,
     predictedDirection: "up",
     predictedChange: 2.5,
@@ -79,7 +79,7 @@ async function populateCaches() {
     timeframe: "5m",
     updatedAt: Date.now(),
   });
-  await lstm.set(tokens.tokenB.mint, "1h", {
+  await regime.set(tokens.tokenB.mint, "1h", {
     token: tokens.tokenB.mint,
     predictedDirection: "up",
     predictedChange: 5.1,
@@ -87,7 +87,7 @@ async function populateCaches() {
     timeframe: "1h",
     updatedAt: Date.now(),
   });
-  await lstm.set(tokens.tokenC.mint, "5m", {
+  await regime.set(tokens.tokenC.mint, "5m", {
     token: tokens.tokenC.mint,
     predictedDirection: "down",
     predictedChange: -1.8,
@@ -95,7 +95,7 @@ async function populateCaches() {
     timeframe: "5m",
     updatedAt: Date.now(),
   });
-  logger.info("LSTM cache populated");
+  logger.info("Regime cache populated");
 
   // Token safety scores
   await tokenScore.set(tokens.tokenA.mint, {
@@ -170,8 +170,8 @@ async function populateCaches() {
   const whaleData = await whale.get("whale_wallet_001");
   logger.info({ wallet: "whale_001", action: whaleData?.action }, "Whale read");
 
-  const lstmPred = await lstm.get(tokens.tokenB.mint, "5m");
-  logger.info({ token: "fSOL", direction: lstmPred?.predictedDirection }, "LSTM read");
+  const regimePred = await regime.get(tokens.tokenB.mint, "5m");
+  logger.info({ token: "fSOL", direction: regimePred?.predictedDirection }, "Regime read");
 
   const safeCheck = await tokenScore.isSafe(tokens.tokenA.mint);
   logger.info({ token: "fUSDC", safe: safeCheck }, "Token safety read");

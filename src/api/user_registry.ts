@@ -104,9 +104,9 @@ export class UserRegistry {
       },
       slippage: { maxSlippageBps: globalConfig.protection.slippage_max_bps },
       tradingHours: {
-        enabled: config.tradingHoursStart !== "00:00" || config.tradingHoursEnd !== "23:59",
-        startHour: parseInt(config.tradingHoursStart.split(":")[0] ?? "0"),
-        endHour: parseInt(config.tradingHoursEnd.split(":")[0] ?? "23"),
+        enabled: config.tradingHoursStart !== config.tradingHoursEnd,
+        startMinutes: +(config.tradingHoursStart.split(":")[0] ?? 0) * 60 + +(config.tradingHoursStart.split(":")[1] ?? 0),
+        endMinutes:   +(config.tradingHoursEnd.split(":")[0]   ?? 0) * 60 + +(config.tradingHoursEnd.split(":")[1]   ?? 0),
       },
     });
 

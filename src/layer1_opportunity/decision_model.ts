@@ -1,4 +1,4 @@
-import { LSTMSignal, LSTMSignalResult } from "./ai_signals/lstm_signal";
+import { RegimeSignal, RegimeSignalResult } from "./ai_signals/regime_signal";
 import { SentimentSignal, SentimentSignalResult } from "./ai_signals/sentiment_signal";
 import { WhaleSignal, WhaleSignalResult } from "./ai_signals/whale_signal";
 import { MempoolSignal, MempoolSignalResult } from "./ai_signals/mempool_signal";
@@ -61,17 +61,141 @@ export function computeSignalAgreement(scores: number[]): { agreement: number; r
 /** Floor below which a multi-sensor decision is considered unreliable. */
 export const AGREEMENT_FLOOR = 0.5;
 
+// ── Signal abstraction (Strategy pattern) ──────────────────────────────
+//
+// Each weighted AI sensor implements `Signal`. computeScore() iterates the
+// signal list generically: it gathers every signal in parallel, maps each to a
+// [0,1] score, weights them, and cross-validates them for the ASI01 agreement
+// gate. Adding a sensor is one entry in the array — no edits to the weighting,
+// agreement, or breakdown logic.
+//
+// Why VolatilityPredictor is NOT a Signal: it does not contribute a weighted
+// term to the aiScore. It feeds volExpansionProb / volLevel, which act as a
+// sizing/risk modifier downstream. It is therefore evaluated separately, not
+// through this interface.
+
+/** Stable key identifying which weight + breakdown slot a signal owns. */
+export type SignalKey = "chart" | "social" | "whale" | "mempool" | "news";
+
+/** Context passed to every signal each tick. */
+export interface SignalContext {
+  tokenMint: string;
+  tokenName?: string;
+  newsSymbol: string;
+  featureHints?: { regimeFeatures: number[]; gruFeatures: number[] };
+}
+
+/** Per-signal output: a [0,1] score, whether it actually had data, and any
+ *  metadata the DecisionResult surfaces for this sensor. */
+export interface SignalOutput {
+  /** Normalized score in [0,1] around a 0.5 neutral. */
+  score: number;
+  /** True when the sensor returned real data (counted in the agreement set). */
+  present: boolean;
+  /** Sensor-specific fields merged into the DecisionResult. */
+  meta?: Partial<DecisionResult>;
+}
+
+export interface Signal {
+  readonly key: SignalKey;
+  /** Default weight share (0-100 scale, matching AIWeights). */
+  readonly defaultWeight: number;
+  evaluate(ctx: SignalContext): Promise<SignalOutput>;
+}
+
+// ── Concrete signal adapters ───────────────────────────────────────────
+
+class ChartSignal implements Signal {
+  readonly key = "chart" as const;
+  readonly defaultWeight = 0; // chart/social/whale share the remainder; see weighting
+  constructor(private readonly regime: RegimeSignal) {}
+  async evaluate(ctx: SignalContext): Promise<SignalOutput> {
+    const r = await this.regime
+      .getSignal(ctx.tokenMint, "15m", ctx.featureHints?.regimeFeatures, ctx.featureHints?.gruFeatures)
+      .catch((): RegimeSignalResult | null => null);
+    if (!r) return { score: 0.5, present: false, meta: { regime: "unknown" } };
+    const base = r.direction === "up" ? 0.7 : r.direction === "down" ? 0.3 : 0.5;
+    // Scale by confidence: move further from 0.5 with higher confidence.
+    const score = 0.5 + (base - 0.5) * r.confidence;
+    return { score, present: true, meta: { regime: r.regime } };
+  }
+}
+
+class SocialSignal implements Signal {
+  readonly key = "social" as const;
+  readonly defaultWeight = 0;
+  constructor(private readonly sentiment: SentimentSignal) {}
+  async evaluate(ctx: SignalContext): Promise<SignalOutput> {
+    const r = await this.sentiment
+      .getSignal(ctx.tokenMint, ctx.tokenName)
+      .catch((): SentimentSignalResult | null => null);
+    if (!r) return { score: 0.5, present: false, meta: { sentimentLabel: "neutral" } };
+    return { score: (r.score + 1) / 2, present: true, meta: { sentimentLabel: r.label } };
+  }
+}
+
+class WhaleSensorSignal implements Signal {
+  readonly key = "whale" as const;
+  readonly defaultWeight = 0;
+  constructor(private readonly whale: WhaleSignal) {}
+  async evaluate(ctx: SignalContext): Promise<SignalOutput> {
+    const r = await this.whale.getSignal(ctx.tokenMint).catch((): WhaleSignalResult | null => null);
+    if (!r || r.netDirection === "unknown") {
+      return { score: 0.5, present: false, meta: { whaleDirection: r?.netDirection ?? "unknown" } };
+    }
+    const score =
+      r.netDirection === "bullish" ? 0.5 + 0.5 * r.avgConfidence
+      : r.netDirection === "bearish" ? 0.5 - 0.5 * r.avgConfidence
+      : 0.5;
+    return { score, present: true, meta: { whaleDirection: r.netDirection } };
+  }
+}
+
+class MempoolSensorSignal implements Signal {
+  readonly key = "mempool" as const;
+  readonly defaultWeight = 15; // default 0.15 share
+  constructor(private readonly mempool: MempoolSignal) {}
+  async evaluate(ctx: SignalContext): Promise<SignalOutput> {
+    const r = await this.mempool.getSignal(ctx.tokenMint).catch((): MempoolSignalResult | null => null);
+    if (!r) return { score: 0.5, present: false };
+    // pressureScore in [-1,+1] → [0,1]
+    return {
+      score: (r.pressureScore + 1) / 2,
+      present: true,
+      meta: { mempoolDirection: r.netDirection, mempoolPressure: parseFloat(r.pressureScore.toFixed(4)) },
+    };
+  }
+}
+
+class NewsSensorSignal implements Signal {
+  readonly key = "news" as const;
+  readonly defaultWeight = 10; // default 0.10 share
+  constructor(private readonly news: NewsSignal) {}
+  async evaluate(ctx: SignalContext): Promise<SignalOutput> {
+    const r = await this.news.getSignal(ctx.newsSymbol).catch((): NewsSignalResult | null => null);
+    if (!r) return { score: 0.5, present: false };
+    // combinedScore in [-1,+1] → [0,1]
+    return {
+      score: (r.combinedScore + 1) / 2,
+      present: true,
+      meta: {
+        newsDirection: r.netDirection,
+        newsCombined: parseFloat(r.combinedScore.toFixed(4)),
+        newsHeadlineCount: r.headlineCount,
+      },
+    };
+  }
+}
+
 export class DecisionModel {
-  private lstmSignal: LSTMSignal;
-  private sentimentSignal: SentimentSignal;
-  private whaleSignal: WhaleSignal;
+  // Five weighted sensors, iterated generically.
+  private readonly signals: Signal[];
+  // Volatility is a sizing modifier, not a weighted term — kept separate.
   private volatilityPredictor: VolatilityPredictor | null;
-  private mempoolSignal: MempoolSignal | null;
-  private newsSignal: NewsSignal | null;
   private newsSymbol: string;
 
   constructor(
-    lstmSignal: LSTMSignal,
+    regimeSignal: RegimeSignal,
     sentimentSignal: SentimentSignal,
     whaleSignal: WhaleSignal,
     volatilityPredictor: VolatilityPredictor | null = null,
@@ -79,12 +203,16 @@ export class DecisionModel {
     newsSignal: NewsSignal | null = null,
     newsSymbol: string = "sol",
   ) {
-    this.lstmSignal = lstmSignal;
-    this.sentimentSignal = sentimentSignal;
-    this.whaleSignal = whaleSignal;
+    // chart/social/whale are always present; mempool/news only when wired.
+    this.signals = [
+      new ChartSignal(regimeSignal),
+      new SocialSignal(sentimentSignal),
+      new WhaleSensorSignal(whaleSignal),
+    ];
+    if (mempoolSignal) this.signals.push(new MempoolSensorSignal(mempoolSignal));
+    if (newsSignal) this.signals.push(new NewsSensorSignal(newsSignal));
+
     this.volatilityPredictor = volatilityPredictor;
-    this.mempoolSignal = mempoolSignal;
-    this.newsSignal = newsSignal;
     this.newsSymbol = newsSymbol;
   }
 
@@ -94,35 +222,42 @@ export class DecisionModel {
     tokenName?: string,
     featureHints?: { regimeFeatures: number[]; gruFeatures: number[] },
   ): Promise<DecisionResult> {
-    // 1. Gather all signals in parallel — including 5th (mempool) and 6th (news)
-    const [lstm, sentiment, whale, vol, mempool, news] = await Promise.all([
-      this.lstmSignal.getSignal(tokenMint, "15m", featureHints?.regimeFeatures, featureHints?.gruFeatures).catch((): LSTMSignalResult | null => null),
-      this.sentimentSignal.getSignal(tokenMint, tokenName).catch((): SentimentSignalResult | null => null),
-      this.whaleSignal.getSignal(tokenMint).catch((): WhaleSignalResult | null => null),
+    const ctx: SignalContext = {
+      tokenMint,
+      ...(tokenName !== undefined ? { tokenName } : {}),
+      newsSymbol: this.newsSymbol,
+      ...(featureHints ? { featureHints } : {}),
+    };
+
+    // 1. Gather every weighted signal in parallel + the volatility modifier.
+    const [outputs, vol] = await Promise.all([
+      Promise.all(this.signals.map((s) => s.evaluate(ctx))),
       this.volatilityPredictor && featureHints?.gruFeatures
         ? this.volatilityPredictor.predict(tokenMint, featureHints.gruFeatures).catch((): VolatilityResult | null => null)
         : Promise.resolve<VolatilityResult | null>(null),
-      this.mempoolSignal
-        ? this.mempoolSignal.getSignal(tokenMint).catch((): MempoolSignalResult | null => null)
-        : Promise.resolve<MempoolSignalResult | null>(null),
-      this.newsSignal
-        ? this.newsSignal.getSignal(this.newsSymbol).catch((): NewsSignalResult | null => null)
-        : Promise.resolve<NewsSignalResult | null>(null),
     ]);
 
-    // 2. Convert each signal to a 0-1 score
-    const chartScore = this.directionToScore(lstm);
-    const socialScore = sentiment ? (sentiment.score + 1) / 2 : 0.5;
-    const whaleScore = this.whaleToScore(whale);
-    // mempool.pressureScore is in [-1,+1] → map to [0,1]
-    const mempoolScore = mempool ? (mempool.pressureScore + 1) / 2 : 0.5;
-    // news.combinedScore is in [-1,+1] → map to [0,1]; neutral if no signal
-    const newsScore = news ? (news.combinedScore + 1) / 2 : 0.5;
+    // 2. Index scores by signal key for weighting + breakdown.
+    const scoreByKey = new Map<SignalKey, number>();
+    const presentByKey = new Map<SignalKey, boolean>();
+    let mergedMeta: Partial<DecisionResult> = {};
+    this.signals.forEach((s, i) => {
+      const out = outputs[i]!;
+      scoreByKey.set(s.key, out.score);
+      presentByKey.set(s.key, out.present);
+      if (out.meta) mergedMeta = { ...mergedMeta, ...out.meta };
+    });
 
-    // 3. Compose weights — mempool (5th) and news (6th) each have a default
-    //    fixed share when not specified by the user. Defaults: mempool 0.15,
-    //    news 0.10. The other three (chart/social/whale) share the remainder
-    //    proportionally. Any explicit weight overrides the default.
+    const scoreOf = (k: SignalKey): number => scoreByKey.get(k) ?? 0.5;
+    const chartScore = scoreOf("chart");
+    const socialScore = scoreOf("social");
+    const whaleScore = scoreOf("whale");
+    const mempoolScore = scoreOf("mempool");
+    const newsScore = scoreOf("news");
+
+    // 3. Compose normalized weights. mempool (5th) and news (6th) carry a default
+    //    fixed share when the user doesn't specify them; chart/social/whale share
+    //    the remainder proportionally. Any explicit weight overrides the default.
     const userMempool = weights.mempool;
     const userNews = weights.news;
     const otherSum = weights.chart + weights.social + weights.whale;
@@ -159,7 +294,7 @@ export class DecisionModel {
       }
     }
 
-    // 4. Compute weighted score
+    // 4. Weighted score.
     const aiScore =
       normChart   * chartScore +
       normSocial  * socialScore +
@@ -171,20 +306,18 @@ export class DecisionModel {
     //     [0,1] around a 0.5 neutral. Standard deviation across the *present*
     //     sensors measures disagreement; a tightly clustered set is trustworthy,
     //     a wide spread suggests one sensor may be manipulated (e.g. spoofed
-    //     mempool pressure or an injected sentiment spike). We only count sensors
-    //     that actually returned data (non-0.5-default) so a missing sensor
-    //     doesn't fake agreement.
+    //     mempool pressure or an injected sentiment spike). Only sensors that
+    //     actually returned data are counted so a missing sensor doesn't fake
+    //     agreement.
     const presentScores: number[] = [];
-    if (lstm) presentScores.push(chartScore);
-    if (sentiment) presentScores.push(socialScore);
-    if (whale && whale.netDirection !== "unknown") presentScores.push(whaleScore);
-    if (mempool) presentScores.push(mempoolScore);
-    if (news) presentScores.push(newsScore);
+    for (const s of this.signals) {
+      if (presentByKey.get(s.key)) presentScores.push(scoreOf(s.key));
+    }
 
-    const { agreement, reason: disagreementReason } = this.computeAgreement(presentScores);
+    const { agreement, reason: disagreementReason } = computeSignalAgreement(presentScores);
     const reliable = presentScores.length >= 2 ? agreement >= AGREEMENT_FLOOR : true;
 
-    // 5. Determine overall direction
+    // 5. Overall direction.
     let direction: "bullish" | "bearish" | "neutral" = "neutral";
     if (aiScore > 0.6) direction = "bullish";
     else if (aiScore < 0.4) direction = "bearish";
@@ -192,16 +325,16 @@ export class DecisionModel {
     const result: DecisionResult = {
       aiScore: parseFloat(aiScore.toFixed(4)),
       direction,
-      regime: lstm?.regime ?? "unknown",
-      sentimentLabel: sentiment?.label ?? "neutral",
-      whaleDirection: whale?.netDirection ?? "unknown",
+      regime: mergedMeta.regime ?? "unknown",
+      sentimentLabel: mergedMeta.sentimentLabel ?? "neutral",
+      whaleDirection: mergedMeta.whaleDirection ?? "unknown",
       volExpansionProb: vol ? parseFloat(vol.expansionProb.toFixed(4)) : null,
       volLevel: vol?.level ?? null,
-      mempoolDirection: mempool?.netDirection ?? null,
-      mempoolPressure: mempool ? parseFloat(mempool.pressureScore.toFixed(4)) : null,
-      newsDirection: news?.netDirection ?? null,
-      newsCombined: news ? parseFloat(news.combinedScore.toFixed(4)) : null,
-      newsHeadlineCount: news?.headlineCount ?? null,
+      mempoolDirection: mergedMeta.mempoolDirection ?? null,
+      mempoolPressure: mergedMeta.mempoolPressure ?? null,
+      newsDirection: mergedMeta.newsDirection ?? null,
+      newsCombined: mergedMeta.newsCombined ?? null,
+      newsHeadlineCount: mergedMeta.newsHeadlineCount ?? null,
       breakdown: {
         chartScore: parseFloat(chartScore.toFixed(4)),
         socialScore: parseFloat(socialScore.toFixed(4)),
@@ -241,25 +374,5 @@ export class DecisionModel {
     }
 
     return result;
-  }
-
-  private computeAgreement(scores: number[]): { agreement: number; reason?: string } {
-    return computeSignalAgreement(scores);
-  }
-
-  private directionToScore(lstm: LSTMSignalResult | null): number {
-    if (!lstm) return 0.5;
-    const base = lstm.direction === "up" ? 0.7
-               : lstm.direction === "down" ? 0.3
-               : 0.5;
-    // Scale by confidence: move further from 0.5 with higher confidence
-    return 0.5 + (base - 0.5) * lstm.confidence;
-  }
-
-  private whaleToScore(whale: WhaleSignalResult | null): number {
-    if (!whale || whale.netDirection === "unknown") return 0.5;
-    if (whale.netDirection === "bullish") return 0.5 + 0.5 * whale.avgConfidence;
-    if (whale.netDirection === "bearish") return 0.5 - 0.5 * whale.avgConfidence;
-    return 0.5; // neutral
   }
 }

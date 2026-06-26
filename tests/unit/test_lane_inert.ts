@@ -14,9 +14,12 @@
 import { UserLane } from "../../src/graph/user_lane";
 import type { LaneEvent } from "../../src/graph/events";
 import type { EngineDeps } from "../../src/graph/deps";
+import type { CompiledGraph } from "../../src/graph/build";
+import type { GraphTickResult } from "../../src/graph/entries";
 import { logger } from "../../src/utils/logger";
 
-// Minimal deps — UserLane only reads deps.userId in Phase 2.
+// Minimal deps — these inert-drain tests only exercise the queue + consumer
+// loop, so deps just needs to satisfy the type and carry a userId.
 function fakeDeps(userId = "test-user"): EngineDeps {
   return {
     engine: {} as any,
@@ -42,6 +45,22 @@ function fakeDeps(userId = "test-user"): EngineDeps {
   };
 }
 
+// Fake compiled graph: every entry point calls graph.invoke(initial) and reads
+// finalState.result / finalState.lastDecision. Returning an empty state keeps
+// dispatch successful (errorTotal stays 0) without any real node execution, so
+// these tests remain pure-TS — no Solana RPC, no Redis, no AI server.
+const fakeGraph = {
+  invoke: async () => ({ result: null, lastDecision: null }),
+} as unknown as CompiledGraph;
+
+// onResult sink — the inert-drain tests assert on lane metrics, not results.
+const noopResult = (_gtr: GraphTickResult): void => {};
+
+// Construct a lane wired to the fake graph + sink.
+function makeLane(userId = "test-user"): UserLane {
+  return new UserLane(fakeDeps(userId), fakeGraph, noopResult);
+}
+
 function makeEvent(kind: LaneEvent["kind"], userId = "test-user"): LaneEvent {
   // Type-safe event construction per kind
   if (kind === "signals_timer") return { kind, userId, enqueuedAt: Date.now() };
@@ -53,7 +72,7 @@ function makeEvent(kind: LaneEvent["kind"], userId = "test-user"): LaneEvent {
 }
 
 async function testBasicDrain() {
-  const lane = new UserLane(fakeDeps());
+  const lane = makeLane();
 
   // Enqueue before start — queue accumulates offline.
   const N = 20;
@@ -72,7 +91,7 @@ async function testBasicDrain() {
 }
 
 async function testMixedKinds() {
-  const lane = new UserLane(fakeDeps());
+  const lane = makeLane();
 
   const kinds: LaneEvent["kind"][] = [
     "signals_timer", "arb_opportunity", "liq_opportunity",
@@ -94,7 +113,7 @@ async function testMixedKinds() {
 async function testDropPolicyNeverDrop() {
   // Fill queue past capacity with never_drop candle_closed events.
   // They should all be processed (queue grows beyond capacity with a warning).
-  const lane = new UserLane(fakeDeps());
+  const lane = makeLane();
   const N = 300; // exceeds default capacity (256)
   for (let i = 0; i < N; i++) {
     lane.enqueue(makeEvent("candle_closed"));
@@ -114,7 +133,7 @@ async function testDropPolicyDropOldest() {
   // Fill queue to capacity with signals_timer (drop_oldest policy), then add one more.
   // The oldest should be evicted and the new one accepted. Queue should be at capacity.
   const CAPACITY = 256;
-  const lane = new UserLane(fakeDeps());
+  const lane = makeLane();
 
   for (let i = 0; i < CAPACITY + 5; i++) {
     lane.enqueue(makeEvent("signals_timer"));
@@ -141,7 +160,7 @@ async function testDropPolicyDropOldest() {
 
 async function testEnqueueAfterStart() {
   // Enqueue events after start() — consumer should pick them up live.
-  const lane = new UserLane(fakeDeps());
+  const lane = makeLane();
   lane.start();
 
   const N = 10;
